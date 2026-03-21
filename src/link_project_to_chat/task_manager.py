@@ -46,6 +46,7 @@ class Task:
     started_at: float | None = None
     finished_at: float | None = None
     notified: bool = False
+    _compact: bool = field(default=False, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
     _log: collections.deque = field(default_factory=lambda: collections.deque(maxlen=100), repr=False)
@@ -112,6 +113,22 @@ class TaskManager:
         self._ensure_claude_worker()
         return task
 
+    def submit_compact(self, chat_id: int, message_id: int) -> Task:
+        task = Task(
+            id=self._next_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            type=TaskType.CLAUDE,
+            input="/compact",
+            name="compact",
+            _compact=True,
+        )
+        self._next_id += 1
+        self._tasks[task.id] = task
+        self._claude_queue.put_nowait(task)
+        self._ensure_claude_worker()
+        return task
+
     def run_command(self, chat_id: int, message_id: int, command: str,
                     name: str | None = None) -> Task:
         task = Task(
@@ -152,7 +169,10 @@ class TaskManager:
             await self._safe_callback(self._on_claude_started, task)
 
             try:
-                task.result = await self._claude.chat(task.input)
+                if task._compact:
+                    task.result = await self._do_compact()
+                else:
+                    task.result = await self._claude.chat(task.input)
                 task.status = TaskStatus.DONE
             except asyncio.CancelledError:
                 task.status = TaskStatus.CANCELLED
@@ -167,6 +187,25 @@ class TaskManager:
 
             if task.status != TaskStatus.CANCELLED:
                 await self._safe_callback(self._on_complete, task)
+
+    COMPACT_PROMPT = (
+        "Summarize our entire conversation concisely. Include:\n"
+        "- Key decisions and architectural choices\n"
+        "- What was implemented or changed\n"
+        "- Current project state\n"
+        "- Pending items or next steps\n"
+        "This summary will seed a new session to continue our work."
+    )
+
+    async def _do_compact(self) -> str:
+        if not self._claude.session_id:
+            return "No active session to compact."
+        summary = await self._claude.chat(self.COMPACT_PROMPT)
+        self._claude.session_id = None
+        await self._claude.chat(
+            f"Continue from this context summary of our previous session:\n\n{summary}"
+        )
+        return summary
 
     # -- Command execution (parallel) --
 

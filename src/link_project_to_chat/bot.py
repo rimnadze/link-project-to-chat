@@ -26,6 +26,7 @@ COMMANDS = [
     ("tasks", "List tasks"),
     ("log", "Show task output"),
     ("cancel", "Cancel a task"),
+    ("compact", "Compress session context"),
     ("status", "Bot status"),
     ("reset", "Clear Claude session"),
 ]
@@ -67,9 +68,12 @@ class ProjectBot:
             typing.cancel()
 
         if task.type == TaskType.CLAUDE:
-            text = task.result if task.status == TaskStatus.DONE else f"Error: {task.error}"
             if self.task_manager.claude.session_id:
                 save_session(self.name, self.task_manager.claude.session_id)
+            if task._compact:
+                text = "Session compacted." if task.status == TaskStatus.DONE else f"Compact failed: {task.error}"
+            else:
+                text = task.result if task.status == TaskStatus.DONE else f"Error: {task.error}"
             await self._send_to_chat(task.chat_id, text, reply_to=task.message_id)
         else:
             icon = "+" if task.status == TaskStatus.DONE else "!"
@@ -222,6 +226,16 @@ class ProjectBot:
                    else f"#{task_id} not found or already finished.")
         await update.effective_message.reply_text(msg)
 
+    async def _on_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update.effective_user):
+            return
+        if not self.task_manager.claude.session_id:
+            return await update.effective_message.reply_text("No active session.")
+        self.task_manager.submit_compact(
+            chat_id=update.effective_chat.id,
+            message_id=update.effective_message.message_id,
+        )
+
     async def _on_reset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
             return
@@ -299,6 +313,7 @@ class ProjectBot:
             "tasks": self._on_tasks,
             "log": self._on_log,
             "cancel": self._on_cancel,
+            "compact": self._on_compact,
             "reset": self._on_reset,
             "status": self._on_status,
         }
