@@ -63,7 +63,6 @@ def clear_session(project_name: str, path: Path = SESSIONS_FILE) -> None:
         path.write_text(json.dumps(sessions, indent=2) + "\n")
 
 
-
 def save_config(config: Config, path: Path = DEFAULT_CONFIG) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)

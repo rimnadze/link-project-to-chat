@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import platform
 import time
 from pathlib import Path
 
@@ -107,9 +106,7 @@ class ProjectBot:
 
         # If edited message, cancel previous task for this message_id
         for prev in self.task_manager.find_by_message(msg.message_id):
-            if prev.type == TaskType.CLAUDE and prev.status == TaskStatus.RUNNING:
-                self.task_manager.claude.cancel()
-            prev.cancel()
+            self.task_manager.cancel(prev.id)
             typing = self._typing_tasks.pop(prev.id, None)
             if typing:
                 typing.cancel()
@@ -133,11 +130,15 @@ class ProjectBot:
         )
 
     async def _on_tasks(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/tasks [all] - list active tasks (or all with 'all')."""
         if not self._auth(update.effective_user):
             return
+        show_all = ctx.args and ctx.args[0].lower() == "all"
         tasks = self.task_manager.list_tasks(chat_id=update.effective_chat.id)
+        if not show_all:
+            tasks = [t for t in tasks if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING)]
         if not tasks:
-            return await update.effective_message.reply_text("No tasks.")
+            return await update.effective_message.reply_text("No active tasks.")
 
         icons = {
             TaskStatus.WAITING: "~",
@@ -176,12 +177,16 @@ class ProjectBot:
         if task.type == TaskType.COMMAND and task.exit_code is not None:
             lines.append(f"Exit: {task.exit_code}")
 
-        if task.result:
+        if task.status == TaskStatus.RUNNING:
+            tail = task.tail(10)
+            if tail:
+                lines.append(f"\n{tail}")
+            else:
+                lines.append(f"\nRunning for {task.elapsed}s...")
+        elif task.result:
             lines.append(f"\n{task.result}")
         elif task.error:
             lines.append(f"\nError: {task.error}")
-        elif task.status == TaskStatus.RUNNING:
-            lines.append(f"\nRunning for {task.elapsed}s...")
         elif task.status == TaskStatus.WAITING:
             lines.append("\nWaiting...")
 

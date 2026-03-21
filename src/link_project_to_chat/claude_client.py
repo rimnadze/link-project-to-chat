@@ -23,8 +23,12 @@ class ClaudeClient:
         self._total_requests: int = 0
 
     async def chat(self, user_message: str) -> str:
-        cmd = ["claude", "-p", "--model", self.model, "--output-format", "json",
-               "--dangerously-skip-permissions"]
+        cmd = [
+            "claude", "-p",
+            "--model", self.model,
+            "--output-format", "json",
+            "--dangerously-skip-permissions",
+        ]
 
         if self.session_id:
             cmd.extend(["--resume", self.session_id])

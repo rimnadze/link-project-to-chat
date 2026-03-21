@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import enum
 import logging
 import subprocess
@@ -47,6 +48,10 @@ class Task:
     notified: bool = False
     _proc: subprocess.Popen | None = field(default=None, repr=False)
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
+    _log: collections.deque = field(default_factory=lambda: collections.deque(maxlen=100), repr=False)
+
+    def tail(self, n: int = 10) -> str:
+        return "\n".join(list(self._log)[-n:])
 
     @property
     def elapsed(self) -> float | None:
@@ -147,8 +152,7 @@ class TaskManager:
             await self._safe_callback(self._on_claude_started, task)
 
             try:
-                response = await self._claude.chat(task.input)
-                task.result = response
+                task.result = await self._claude.chat(task.input)
                 task.status = TaskStatus.DONE
             except asyncio.CancelledError:
                 task.status = TaskStatus.CANCELLED
@@ -181,12 +185,24 @@ class TaskManager:
             NOTIFY_AFTER, lambda: asyncio.create_task(self._notify_long(task))
         )
 
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _read_stream(stream, lines: list[str]):
+            for raw_line in stream:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                lines.append(line)
+                task._log.append(line)
+
         try:
-            stdout, stderr = await asyncio.to_thread(proc.communicate)
+            out_fut = asyncio.to_thread(_read_stream, proc.stdout, stdout_lines)
+            err_fut = asyncio.to_thread(_read_stream, proc.stderr, stderr_lines)
+            await asyncio.gather(out_fut, err_fut)
+            await asyncio.to_thread(proc.wait)
         except asyncio.CancelledError:
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
+                proc.wait()
             task.status = TaskStatus.CANCELLED
             task.finished_at = time.monotonic()
             notify_handle.cancel()
@@ -199,8 +215,8 @@ class TaskManager:
         if task.status == TaskStatus.CANCELLED:
             return
 
-        task.result = stdout.decode("utf-8", errors="replace")
-        task.error = stderr.decode("utf-8", errors="replace") or None
+        task.result = "\n".join(stdout_lines)
+        task.error = "\n".join(stderr_lines) or None
         task.exit_code = proc.returncode
         task.status = TaskStatus.DONE if proc.returncode == 0 else TaskStatus.FAILED
         logger.info("task #%d %s in %.1fs (exit %d)",
