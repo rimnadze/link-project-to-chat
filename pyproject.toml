@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "link-project-to-chat"
+version = "0.1.0"
+description = "Link a project directory to a Telegram bot that chats with Claude"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot>=22.0",
+    "click>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/link_project_to_chat"]
+
+[project.scripts]
+link-project-to-chat = "link_project_to_chat.cli:main"
