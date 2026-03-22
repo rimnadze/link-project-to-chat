@@ -6,11 +6,34 @@ build-backend = "hatchling.build"
 name = "link-project-to-chat"
 version = "0.1.0"
 description = "Link a project directory to a Telegram bot that chats with Claude"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Rezo Imnadze", email = "rezo@imnadze.ge" },
+]
+keywords = ["claude", "telegram", "bot", "ai", "claude-code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Communications :: Chat",
+]
 dependencies = [
     "python-telegram-bot>=22.0",
     "click>=8.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rimnadze/link-project-to-chat"
+Repository = "https://github.com/rimnadze/link-project-to-chat"
+Issues = "https://github.com/rimnadze/link-project-to-chat/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/link_project_to_chat"]
