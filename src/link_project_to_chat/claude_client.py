@@ -10,11 +10,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+EFFORT_LEVELS = ("low", "medium", "high", "max")
+
 
 class ClaudeClient:
     def __init__(self, model: str, project_path: Path):
         self.model = model
         self.project_path = project_path
+        self.effort: str = "medium"
         self.session_id: str | None = None
         self._proc: subprocess.Popen | None = None
         self._started_at: float | None = None
@@ -27,6 +30,7 @@ class ClaudeClient:
             "claude", "-p",
             "--model", self.model,
             "--output-format", "json",
+            "--effort", self.effort,
             "--dangerously-skip-permissions",
         ]
 
@@ -56,11 +60,7 @@ class ClaudeClient:
         logger.info("claude subprocess started pid=%s", proc.pid)
 
         try:
-            stdout, stderr = await asyncio.to_thread(proc.communicate, timeout=300)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return "[Response timed out after 5 minutes]"
+            stdout, stderr = await asyncio.to_thread(proc.communicate)
         finally:
             self._last_duration = time.monotonic() - started_at
             if self._proc is proc:

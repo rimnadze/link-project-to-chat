@@ -17,6 +17,7 @@ from telegram.ext import (
 
 from .config import Config, clear_session, load_sessions, save_session
 from .formatting import md_to_telegram, split_html, strip_html
+from .claude_client import EFFORT_LEVELS
 from .task_manager import Task, TaskManager, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ COMMANDS = [
     ("tasks", "List tasks"),
     ("log", "Show task output"),
     ("cancel", "Cancel a task"),
+    ("effort", "Set thinking depth (low/medium/high/max)"),
     ("compact", "Compress session context"),
     ("status", "Bot status"),
     ("reset", "Clear Claude session"),
@@ -47,7 +49,6 @@ class ProjectBot:
             model=model,
             project_path=self.path,
             on_complete=self._on_task_complete,
-            on_long_running=self._on_task_long_running,
             on_claude_started=self._on_claude_started,
         )
 
@@ -82,13 +83,6 @@ class ProjectBot:
             if len(output) > 3000:
                 output = output[:3000] + "\n... (truncated, use /log)"
             await self._send_to_chat(task.chat_id, f"{header}\n\n{output}")
-
-    async def _on_task_long_running(self, task: Task) -> None:
-        if task.type == TaskType.CLAUDE:
-            text = f"#{task.id} still running... ({task.elapsed}s)"
-        else:
-            text = f"#{task.id} ({task.name}) still running... ({task.elapsed}s)"
-        await self._send_to_chat(task.chat_id, text)
 
     # -- Command handlers --
 
@@ -226,6 +220,20 @@ class ProjectBot:
                    else f"#{task_id} not found or already finished.")
         await update.effective_message.reply_text(msg)
 
+    async def _on_effort(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update.effective_user):
+            return
+        if not ctx.args:
+            current = self.task_manager.claude.effort
+            return await update.effective_message.reply_text(
+                f"Current: {current}\nUsage: /effort {{{'/'.join(EFFORT_LEVELS)}}}")
+        level = ctx.args[0].lower()
+        if level not in EFFORT_LEVELS:
+            return await update.effective_message.reply_text(
+                f"Invalid. Choose: {', '.join(EFFORT_LEVELS)}")
+        self.task_manager.claude.effort = level
+        await update.effective_message.reply_text(f"Effort: {level}")
+
     async def _on_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
             return
@@ -299,9 +307,15 @@ class ProjectBot:
 
     @staticmethod
     async def _on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.error("Update error: %s", ctx.error)
+        err = str(ctx.error)
+        if "Conflict" in err:
+            logger.warning("Conflict error (another instance?): %s | update=%s", err, update)
+        else:
+            logger.error("Update error: %s | update=%s", ctx.error, update)
 
     async def _post_init(self, app) -> None:
+        result = await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("delete_webhook result=%s (drop_pending_updates=True)", result)
         await app.bot.set_my_commands(COMMANDS)
 
     def build(self):
@@ -313,6 +327,7 @@ class ProjectBot:
             "tasks": self._on_tasks,
             "log": self._on_log,
             "cancel": self._on_cancel,
+            "effort": self._on_effort,
             "compact": self._on_compact,
             "reset": self._on_reset,
             "status": self._on_status,

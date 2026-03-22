@@ -14,8 +14,6 @@ from .claude_client import ClaudeClient
 
 logger = logging.getLogger(__name__)
 
-NOTIFY_AFTER = 30
-
 
 class TaskType(enum.Enum):
     CLAUDE = "claude"
@@ -45,7 +43,6 @@ class Task:
     created_at: float = field(default_factory=time.monotonic)
     started_at: float | None = None
     finished_at: float | None = None
-    notified: bool = False
     _compact: bool = field(default=False, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
     _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
@@ -82,11 +79,9 @@ OnTaskEvent = Callable[[Task], Awaitable[None]]
 
 class TaskManager:
     def __init__(self, model: str, project_path: Path,
-                 on_complete: OnTaskEvent, on_long_running: OnTaskEvent,
-                 on_claude_started: OnTaskEvent):
+                 on_complete: OnTaskEvent, on_claude_started: OnTaskEvent):
         self.project_path = project_path
         self._on_complete = on_complete
-        self._on_long_running = on_long_running
         self._on_claude_started = on_claude_started
         self._next_id = 1
         self._tasks: dict[int, Task] = {}
@@ -162,10 +157,6 @@ class TaskManager:
             task.status = TaskStatus.RUNNING
             task.started_at = time.monotonic()
 
-            notify_handle = asyncio.get_event_loop().call_later(
-                NOTIFY_AFTER, lambda t=task: asyncio.create_task(self._notify_long(t))
-            )
-
             await self._safe_callback(self._on_claude_started, task)
 
             try:
@@ -182,7 +173,6 @@ class TaskManager:
                 task.error = str(e)
             finally:
                 task.finished_at = time.monotonic()
-                notify_handle.cancel()
                 self._claude_queue.task_done()
 
             if task.status != TaskStatus.CANCELLED:
@@ -220,10 +210,6 @@ class TaskManager:
         task._proc = proc
         logger.info("task #%d started pid=%d: %s", task.id, proc.pid, task.input)
 
-        notify_handle = asyncio.get_event_loop().call_later(
-            NOTIFY_AFTER, lambda: asyncio.create_task(self._notify_long(task))
-        )
-
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
 
@@ -244,10 +230,8 @@ class TaskManager:
                 proc.wait()
             task.status = TaskStatus.CANCELLED
             task.finished_at = time.monotonic()
-            notify_handle.cancel()
             return
 
-        notify_handle.cancel()
         task.finished_at = time.monotonic()
         task._proc = None
 
@@ -264,11 +248,6 @@ class TaskManager:
         await self._safe_callback(self._on_complete, task)
 
     # -- Shared helpers --
-
-    async def _notify_long(self, task: Task) -> None:
-        if task.status == TaskStatus.RUNNING and not task.notified:
-            task.notified = True
-            await self._safe_callback(self._on_long_running, task)
 
     async def _safe_callback(self, cb: OnTaskEvent, task: Task) -> None:
         try:
