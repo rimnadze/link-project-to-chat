@@ -78,7 +78,7 @@ class ProjectBot:
             await self._send_to_chat(task.chat_id, text, reply_to=task.message_id)
         else:
             icon = "+" if task.status == TaskStatus.DONE else "!"
-            header = f"[{icon} #{task.id} {task.name} | {task.elapsed}s | exit {task.exit_code}]"
+            header = f"[{icon} #{task.id} {task.name} | {task.elapsed_human} | exit {task.exit_code}]"
             output = (task.result or "").rstrip() or (task.error or "").rstrip() or "(no output)"
             if len(output) > 3000:
                 output = output[:3000] + "\n... (truncated, use /log)"
@@ -148,7 +148,7 @@ class ProjectBot:
         lines = []
         for t in tasks:
             icon = icons.get(t.status, "?")
-            elapsed = f" {t.elapsed}s" if t.elapsed else ""
+            elapsed = f" {t.elapsed_human}" if t.elapsed_human else ""
             label = t.name if t.type == TaskType.COMMAND else t.input[:50]
             lines.append(f"{icon} #{t.id} [{t.type.value}]{elapsed} {label}")
         await update.effective_message.reply_text("\n".join(lines))
@@ -168,8 +168,8 @@ class ProjectBot:
             return await update.effective_message.reply_text(f"Task #{task_id} not found.")
 
         lines = [f"Task #{task.id} | {task.type.value} | {task.status.value}"]
-        if task.elapsed is not None:
-            lines[0] += f" | {task.elapsed}s"
+        if task.elapsed_human is not None:
+            lines[0] += f" | {task.elapsed_human}"
         lines.append(f"Input: {task.input[:200]}")
 
         if task.type == TaskType.COMMAND and task.exit_code is not None:
@@ -180,7 +180,7 @@ class ProjectBot:
             if tail:
                 lines.append(f"\n{tail}")
             else:
-                lines.append(f"\nRunning for {task.elapsed}s...")
+                lines.append(f"\nRunning for {task.elapsed_human}...")
         elif task.result:
             lines.append(f"\n{task.result}")
         elif task.error:
