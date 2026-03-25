@@ -4,7 +4,9 @@ Chat with Claude about a project via Telegram. Links a local directory to a Tele
 
 ## Security warning
 
-This tool runs `claude --dangerously-skip-permissions` and exposes a `/run` command for arbitrary shell execution. It is a **remote shell** on your machine, protected only by a Telegram username check. Only use it with a bot token you control, restrict access to your username, and never share the token.
+This tool runs `claude --dangerously-skip-permissions` and exposes a `/run` command for arbitrary shell execution. It is a **remote shell** on your machine. Only use it with a bot token you control and never share the token.
+
+Access is restricted to a single Telegram username. On first contact, the bot locks in that user's numeric Telegram ID — subsequent requests are validated by ID, not username, so a username change cannot bypass access.
 
 ## Requirements
 
@@ -29,11 +31,14 @@ link-project-to-chat start --path /path/to/project --token YOUR_BOT_TOKEN --user
 ### With config
 
 ```bash
+# Set your Telegram username (once)
+link-project-to-chat configure --username your_telegram_username
+
 # Link a project
-link-project-to-chat link /path/to/project --token YOUR_BOT_TOKEN --username your_telegram_username
+link-project-to-chat link /path/to/project --token YOUR_BOT_TOKEN
 
 # Start the bot
-link-project-to-chat start --project my-project
+link-project-to-chat start
 ```
 
 ### Multiple projects
@@ -86,10 +91,11 @@ Claude messages and `/run` commands both execute in **parallel** — they don't 
 ## CLI reference
 
 ```
-link-project-to-chat link <path> --token TOKEN [--name NAME] [--username USER] [--model MODEL]
+link-project-to-chat configure --username USER
+link-project-to-chat link <path> --token TOKEN [--name NAME]
 link-project-to-chat unlink <name>
 link-project-to-chat list
-link-project-to-chat start [--project NAME] [--path PATH] [--token TOKEN] [--model MODEL] [--username USER] [--session-id ID]
+link-project-to-chat start [--project NAME] [--path PATH] [--token TOKEN] [--username USER] [--session-id ID]
 ```
 
 Config is stored at `~/.link-project-to-chat/config.json`.

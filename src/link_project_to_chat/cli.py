@@ -15,6 +15,7 @@ from .config import DEFAULT_CONFIG, Config, ProjectConfig, clear_trusted_user_id
 def main(ctx, config_path: str | None):
     """link-project-to-chat: Chat with Claude about a project via Telegram."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = Path(config_path) if config_path else DEFAULT_CONFIG
 
