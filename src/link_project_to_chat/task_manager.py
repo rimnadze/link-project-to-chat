@@ -92,14 +92,14 @@ OnTaskEvent = Callable[[Task], Awaitable[None]]
 
 
 class TaskManager:
-    def __init__(self, model: str, project_path: Path,
+    def __init__(self, project_path: Path,
                  on_complete: OnTaskEvent, on_claude_started: OnTaskEvent):
         self.project_path = project_path
         self._on_complete = on_complete
         self._on_claude_started = on_claude_started
         self._next_id = 1
         self._tasks: dict[int, Task] = {}
-        self._claude = ClaudeClient(model, project_path)
+        self._claude = ClaudeClient(project_path)
 
     @property
     def claude(self) -> ClaudeClient:

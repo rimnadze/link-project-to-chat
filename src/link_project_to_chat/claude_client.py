@@ -13,9 +13,12 @@ logger = logging.getLogger(__name__)
 EFFORT_LEVELS = ("low", "medium", "high", "max")
 
 
+DEFAULT_MODEL = "sonnet"
+
+
 class ClaudeClient:
-    def __init__(self, model: str, project_path: Path):
-        self.model = model
+    def __init__(self, project_path: Path):
+        self.model = DEFAULT_MODEL
         self.project_path = project_path
         self.effort: str = "medium"
         self.session_id: str | None = None

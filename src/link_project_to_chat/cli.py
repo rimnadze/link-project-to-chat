@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from .config import DEFAULT_CONFIG, Config, ProjectConfig, load_config, save_config
+from .config import DEFAULT_CONFIG, Config, ProjectConfig, clear_trusted_user_id, load_config, save_config
 
 
 @click.group()
@@ -23,10 +23,8 @@ def main(ctx, config_path: str | None):
 @click.argument("path", type=click.Path(exists=True, file_okay=False, resolve_path=True))
 @click.option("--name", default=None, help="Project name (defaults to directory name)")
 @click.option("--token", prompt="Telegram bot token", help="Bot token from BotFather")
-@click.option("--username", default=None, help="Restrict to this Telegram username")
-@click.option("--model", default=None, help="Claude model (default: sonnet)")
 @click.pass_context
-def link(ctx, path: str, name: str | None, token: str, username: str | None, model: str | None):
+def link(ctx, path: str, name: str | None, token: str):
     """Link a project directory to a Telegram bot."""
     cfg_path = ctx.obj["config_path"]
     config = load_config(cfg_path)
@@ -34,10 +32,6 @@ def link(ctx, path: str, name: str | None, token: str, username: str | None, mod
     project_name = name or project_path.name
 
     config.projects[project_name] = ProjectConfig(path=str(project_path), telegram_bot_token=token)
-    if username:
-        config.allowed_username = username.lower().lstrip("@")
-    if model:
-        config.model = model
     save_config(config, cfg_path)
     click.echo(f"Linked '{project_name}' -> {project_path}")
 
@@ -72,12 +66,11 @@ def list_projects(ctx):
 @click.option("--path", "project_path", type=click.Path(exists=True, file_okay=False, resolve_path=True),
               default=None, help="Project directory (use instead of config)")
 @click.option("--token", default=None, help="Telegram bot token (use instead of config)")
-@click.option("--model", default=None, help="Claude model (default: sonnet)")
-@click.option("--username", default=None, help="Restrict to this Telegram username")
+@click.option("--username", default=None, help="Allowed Telegram username (overrides config)")
 @click.option("--session-id", default=None, help="Resume a Claude session by ID")
 @click.pass_context
 def start(ctx, project: str | None, project_path: str | None, token: str | None,
-          model: str | None, username: str | None, session_id: str | None):
+          username: str | None, session_id: str | None):
     """Start the Telegram bot.
 
     Use --path and --token to run without a config file, or use config.
@@ -87,20 +80,13 @@ def start(ctx, project: str | None, project_path: str | None, token: str | None,
     # Direct params mode: no config needed
     if project_path and token:
         p = Path(project_path).resolve()
-        run_bot(
-            name=p.name,
-            path=p,
-            token=token,
-            model=model or "sonnet",
-            username=(username or "").lower().lstrip("@"),
-            session_id=session_id,
-        )
+        run_bot(name=p.name, path=p, token=token,
+                username=(username or "").lower().lstrip("@"),
+                session_id=session_id)
         return
 
     # Config mode
     config = load_config(ctx.obj["config_path"])
-    if model:
-        config.model = model
     if username:
         config.allowed_username = username.lower().lstrip("@")
 
@@ -111,7 +97,23 @@ def start(ctx, project: str | None, project_path: str | None, token: str | None,
         if project not in config.projects:
             raise SystemExit(f"Project '{project}' not found.")
         proj = config.projects[project]
-        run_bot(project, Path(proj.path), proj.telegram_bot_token, config.model,
+        run_bot(project, Path(proj.path), proj.telegram_bot_token,
                 config.allowed_username, session_id=session_id)
     else:
         run_bots(config)
+
+
+@main.command()
+@click.option("--username", required=True, prompt="Telegram username", help="Allowed Telegram username")
+@click.pass_context
+def configure(ctx, username: str):
+    """Set the allowed Telegram username."""
+    cfg_path = ctx.obj["config_path"]
+    config = load_config(cfg_path)
+    new_username = username.lower().lstrip("@")
+    if new_username != config.allowed_username:
+        clear_trusted_user_id()
+        click.echo("Trusted user ID cleared (username changed).")
+    config.allowed_username = new_username
+    save_config(config, cfg_path)
+    click.echo(f"Configured username: @{new_username}")

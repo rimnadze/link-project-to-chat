@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Config, clear_session, load_sessions, save_session
+from .config import Config, clear_session, load_sessions, load_trusted_user_id, save_session, save_trusted_user_id
 from .formatting import md_to_telegram, split_html, strip_html
 from .claude_client import EFFORT_LEVELS
 from .task_manager import Task, TaskManager, TaskStatus, TaskType
@@ -35,18 +35,17 @@ COMMANDS = [
 
 
 class ProjectBot:
-    def __init__(self, name: str, path: Path, token: str, model: str,
-                 allowed_username: str):
+    def __init__(self, name: str, path: Path, token: str,
+                 allowed_username: str, trusted_user_id: int | None = None):
         self.name = name
         self.path = path.resolve()
         self.token = token
-        self.model = model
         self.allowed_username = allowed_username
+        self._trusted_user_id: int | None = trusted_user_id
         self._started_at = time.monotonic()
         self._app = None
         self._typing_tasks: dict[int, asyncio.Task] = {}
         self.task_manager = TaskManager(
-            model=model,
             project_path=self.path,
             on_complete=self._on_task_complete,
             on_claude_started=self._on_claude_started,
@@ -55,7 +54,15 @@ class ProjectBot:
     def _auth(self, user) -> bool:
         if not self.allowed_username:
             return True
-        return (user.username or "").lower() == self.allowed_username
+        if self._trusted_user_id is not None:
+            return user.id == self._trusted_user_id
+        # Bootstrap: first contact — match by username, then lock in user_id
+        if (user.username or "").lower() == self.allowed_username:
+            self._trusted_user_id = user.id
+            save_trusted_user_id(user.id)
+            logger.info("Trusted user_id %d saved", user.id)
+            return True
+        return False
 
     # -- Task callbacks --
 
@@ -357,21 +364,24 @@ class ProjectBot:
         return app
 
 
-def run_bot(name: str, path: Path, token: str, model: str, username: str,
+def run_bot(name: str, path: Path, token: str, username: str,
             session_id: str | None = None) -> None:
+    if not username:
+        raise SystemExit("No allowed username configured. Use --username or run 'configure --username'.")
     if session_id:
         save_session(name, session_id)
-    bot = ProjectBot(name, path, token, model, username)
+    trusted_user_id = load_trusted_user_id()
+    bot = ProjectBot(name, path, token, username, trusted_user_id=trusted_user_id)
     bot.task_manager.claude.session_id = session_id or load_sessions().get(name)
     app = bot.build()
-    logger.info("Bot '%s' started at %s (model=%s)", name, path, model)
+    logger.info("Bot '%s' started at %s (trusted_user_id=%s)", name, path, trusted_user_id)
     app.run_polling()
 
 
 def run_bots(config: Config) -> None:
     if len(config.projects) == 1:
         name, proj = next(iter(config.projects.items()))
-        run_bot(name, Path(proj.path), proj.telegram_bot_token, config.model, config.allowed_username)
+        run_bot(name, Path(proj.path), proj.telegram_bot_token, config.allowed_username)
     else:
         names = ", ".join(config.projects.keys())
         raise SystemExit(
