@@ -30,7 +30,7 @@ from .config import (
 from ._auth import AuthMixin
 from .formatting import md_to_telegram, split_html, strip_html
 from .claude_client import EFFORT_LEVELS, MODELS, PERMISSION_MODES
-from .stream import StreamEvent, TextDelta, ToolUse
+from .stream import StreamEvent, TextDelta, ThinkingDelta, ToolUse
 from .task_manager import Task, TaskManager, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,19 @@ class ProjectBot(AuthMixin):
         self._typing_tasks[task.id] = asyncio.create_task(self._keep_typing(chat))
 
     async def _on_stream_event(self, task: Task, event: StreamEvent) -> None:
-        if isinstance(event, TextDelta):
+        if isinstance(event, ThinkingDelta):
+            if task.id not in self._stream_messages:
+                try:
+                    msg = await self._app.bot.send_message(
+                        task.chat_id,
+                        "💭 Thinking...",
+                        reply_to_message_id=task.message_id,
+                    )
+                    self._stream_messages[task.id] = (msg.message_id, time.time())
+                except Exception:
+                    logger.warning("Failed to send thinking placeholder", exc_info=True)
+
+        elif isinstance(event, TextDelta):
             self._stream_text.setdefault(task.id, "")
             self._stream_text[task.id] += event.text
 

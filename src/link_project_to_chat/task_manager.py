@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .claude_client import ClaudeClient
-from .stream import Error, Result, StreamEvent, TextDelta
+from .stream import Error, Result, StreamEvent, TextDelta, ThinkingDelta
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,7 @@ class TaskManager:
                 task.result = await self._do_compact()
             else:
                 collected_text: list[str] = []
+                collected_thinking: list[str] = []
                 async for event in self._claude.chat_stream(
                     task.input,
                     on_proc=lambda p: setattr(task, "_proc", p),
@@ -193,12 +194,14 @@ class TaskManager:
                             )
                     if isinstance(event, TextDelta):
                         collected_text.append(event.text)
+                    elif isinstance(event, ThinkingDelta):
+                        collected_thinking.append(event.text)
                     elif isinstance(event, Result):
                         task.result = event.text
                     elif isinstance(event, Error):
                         raise RuntimeError(event.message)
                 if task.result is None:
-                    task.result = "".join(collected_text) or "[No response]"
+                    task.result = "".join(collected_text) or "".join(collected_thinking) or "[No response]"
             task.status = TaskStatus.DONE
         except asyncio.CancelledError:
             if task._proc and task._proc.poll() is None:

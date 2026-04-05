@@ -17,6 +17,11 @@ class TextDelta(StreamEvent):
 
 
 @dataclass
+class ThinkingDelta(StreamEvent):
+    text: str
+
+
+@dataclass
 class ToolUse(StreamEvent):
     tool: str
     path: str | None
@@ -62,7 +67,11 @@ def parse_stream_line(line: str) -> list[StreamEvent]:
         events: list[StreamEvent] = []
         for item in content:
             item_type = item.get("type")
-            if item_type == "text":
+            if item_type == "thinking":
+                text = item.get("thinking", "")
+                if text:
+                    events.append(ThinkingDelta(text=text))
+            elif item_type == "text":
                 text = item.get("text", "")
                 if text:
                     events.append(TextDelta(text=text))
