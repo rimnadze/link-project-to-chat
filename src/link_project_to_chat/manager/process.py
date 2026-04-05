@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -22,8 +23,11 @@ def _default_command_builder(project_name: str, project_config: dict, flags: dic
     cmd = ["link-project-to-chat", "start", "--project", project_name]
 
     if flags.get("skip_permissions") or project_config.get("dangerously_skip_permissions"):
-        cmd.append("--dangerously-skip-permissions")
-    if flags.get("permission_mode"):
+        if os.getuid() == 0:
+            cmd.extend(["--permission-mode", "bypassPermissions"])
+        else:
+            cmd.append("--dangerously-skip-permissions")
+    elif flags.get("permission_mode"):
         cmd.extend(["--permission-mode", flags["permission_mode"]])
     model = flags.get("model") or project_config.get("model")
     if model:

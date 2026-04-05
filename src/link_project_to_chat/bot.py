@@ -363,7 +363,14 @@ class ProjectBot(AuthMixin):
                 f"Current: {current}\n\nOptions:\n{options}\n\n"
                 f"Usage: /permissions <mode>"
             )
-        mode = ctx.args[0].lower()
+        raw = ctx.args[0]
+        mode_lower = raw.lower()
+        mode_map = {m.lower(): m for m in self._PERMISSION_OPTIONS}
+        mode = mode_map.get(mode_lower)
+        if mode is None:
+            return await update.effective_message.reply_text(
+                f"Invalid. Choose: {', '.join(self._PERMISSION_OPTIONS)}"
+            )
         if mode == "dangerously-skip-permissions":
             self.task_manager.claude.skip_permissions = True
             self.task_manager.claude.permission_mode = None
@@ -372,10 +379,6 @@ class ProjectBot(AuthMixin):
             self.task_manager.claude.skip_permissions = False
             self.task_manager.claude.permission_mode = mode if mode != "default" else None
             await update.effective_message.reply_text(f"Permissions: {mode}")
-        else:
-            await update.effective_message.reply_text(
-                f"Invalid. Choose: {', '.join(self._PERMISSION_OPTIONS)}"
-            )
 
     async def _on_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
