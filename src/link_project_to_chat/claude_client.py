@@ -61,9 +61,11 @@ class ClaudeClient:
         ]
 
         if self.skip_permissions:
-            cmd.append("--dangerously-skip-permissions")
-
-        if self.permission_mode:
+            if os.getuid() == 0:
+                cmd.extend(["--permission-mode", "bypassPermissions"])
+            else:
+                cmd.append("--dangerously-skip-permissions")
+        elif self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
 
         if self.allowed_tools:
