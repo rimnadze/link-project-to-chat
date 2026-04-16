@@ -18,6 +18,7 @@ class ProjectConfig:
     permissions: str | None = None  # one of PERMISSION_MODES or "dangerously-skip-permissions"
     session_id: str | None = None
     autostart: bool = False
+    plugins: list[dict] = field(default_factory=list)  # [{"name": "bore-tunnel", ...}, ...]
 
 
 @dataclass
@@ -67,6 +68,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Config:
                 permissions=_load_permissions(proj),
                 session_id=proj.get("session_id"),
                 autostart=proj.get("autostart", False),
+                plugins=proj.get("plugins", []),
             )
     return config
 
@@ -116,6 +118,10 @@ def save_config(config: Config, path: Path = DEFAULT_CONFIG) -> None:
         else:
             proj.pop("session_id", None)
         proj["autostart"] = p.autostart
+        if p.plugins:
+            proj["plugins"] = p.plugins
+        else:
+            proj.pop("plugins", None)
         existing_projects[name] = proj
     # Remove projects that no longer exist in config
     raw["projects"] = {k: v for k, v in existing_projects.items() if k in config.projects}

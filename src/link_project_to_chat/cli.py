@@ -296,6 +296,7 @@ def start(
             disallowed_tools=disallowed,
             trusted_user_id=effective_trusted_id,
             on_trust=lambda uid: save_project_trusted_user_id(project, uid, cfg_path),
+            plugins=proj.plugins or None,
         )
     else:
         run_bots(

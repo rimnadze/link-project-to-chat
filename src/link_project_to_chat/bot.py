@@ -31,6 +31,7 @@ from .config import (
 from ._auth import AuthMixin
 from .formatting import md_to_telegram, split_html, strip_html
 from .claude_client import EFFORT_LEVELS, MODELS, PERMISSION_MODES
+from .plugin import Plugin, PluginContext, load_plugin
 from .stream import StreamEvent, TextDelta, ThinkingDelta, ToolUse
 from .task_manager import Task, TaskManager, TaskStatus, TaskType
 
@@ -68,6 +69,7 @@ class ProjectBot(AuthMixin):
         permission_mode: str | None = None,
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
+        plugins: list[dict] | None = None,
     ):
         self.name = name
         self.path = path.resolve()
@@ -81,6 +83,9 @@ class ProjectBot(AuthMixin):
         self._stream_text: dict[int, str] = {}
         self._thinking_buf: dict[int, str] = {}   # task_id → accumulated thinking
         self._thinking_store: dict[int, str] = {}  # result_msg_id → thinking text
+        self._plugins: list[Plugin] = []
+        self._plugin_callbacks: dict[str, Callable] = {}
+        self._plugin_configs: list[dict] = plugins or []
         self._init_auth()
         self.task_manager = TaskManager(
             project_path=self.path,
@@ -117,6 +122,11 @@ class ProjectBot(AuthMixin):
                 await self._send_image(
                     task.chat_id, event.path, reply_to=task.message_id
                 )
+            for plugin in self._plugins:
+                try:
+                    await plugin.on_tool_use(event.tool, event.path)
+                except Exception:
+                    logger.warning("plugin %s on_tool_use failed", plugin.name, exc_info=True)
 
     async def _send_html(self, chat_id: int, html: str, reply_to: int | None = None, reply_markup=None) -> int | None:
         """Send HTML message(s), attaching reply_markup to the last chunk. Returns last message ID."""
@@ -187,6 +197,12 @@ class ProjectBot(AuthMixin):
             await self._finalize_claude_task(task)
         else:
             await self._finalize_command_task(task)
+
+        for plugin in self._plugins:
+            try:
+                await plugin.on_task_complete(task)
+            except Exception:
+                logger.warning("plugin %s on_task_complete failed", plugin.name, exc_info=True)
 
     async def _on_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
@@ -374,6 +390,11 @@ class ProjectBot(AuthMixin):
             await query.answer("Unauthorized.")
             return
         await query.answer()
+
+        for prefix, handler in self._plugin_callbacks.items():
+            if query.data.startswith(prefix):
+                await handler(query)
+                return
 
         if query.data.startswith("model_set_"):
             name = query.data[len("model_set_"):]
@@ -619,7 +640,40 @@ class ProjectBot(AuthMixin):
     async def _post_init(self, app) -> None:
         result = await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("delete_webhook result=%s (drop_pending_updates=True)", result)
-        await app.bot.set_my_commands(COMMANDS)
+
+        shared_ctx = PluginContext(
+            bot_name=self.name,
+            project_path=self.path,
+            bot_token=self.token,
+            trusted_user_id=self._trusted_user_id,
+            _send=app.bot.send_message,
+        )
+
+        for cfg in self._plugin_configs:
+            pname = cfg.get("name", "")
+            if not pname:
+                continue
+            plugin = load_plugin(pname, shared_ctx, cfg)
+            if plugin:
+                self._plugins.append(plugin)
+
+        for plugin in self._plugins:
+            for prefix, handler in plugin.callbacks().items():
+                self._plugin_callbacks[prefix] = handler
+            cmds = plugin.commands()
+            if cmds:
+                for bc in cmds:
+                    app.add_handler(CommandHandler(bc.command, bc.handler, filters=filters.ChatType.PRIVATE))
+
+        for plugin in self._plugins:
+            await plugin.start()
+
+        all_commands = list(COMMANDS)
+        for plugin in self._plugins:
+            for bc in plugin.commands():
+                all_commands.append((bc.command, bc.description))
+        await app.bot.set_my_commands(all_commands)
+
         if self._trusted_user_id:
             try:
                 await app.bot.send_message(
@@ -629,12 +683,20 @@ class ProjectBot(AuthMixin):
             except Exception:
                 logger.error("Failed to send startup message", exc_info=True)
 
+    async def _post_shutdown(self, app) -> None:
+        for plugin in reversed(self._plugins):
+            try:
+                await plugin.stop()
+            except Exception:
+                logger.warning("plugin %s stop failed", plugin.name, exc_info=True)
+
     def build(self):
         app = (
             ApplicationBuilder()
             .token(self.token)
             .concurrent_updates(True)
             .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
             .build()
         )
         self._app = app
@@ -694,6 +756,7 @@ def run_bot(
     disallowed_tools: list[str] | None = None,
     trusted_user_id: int | None = None,
     on_trust: Callable[[int], None] | None = None,
+    plugins: list[dict] | None = None,
 ) -> None:
     if not username:
         raise SystemExit(
@@ -709,6 +772,7 @@ def run_bot(
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
+        plugins=plugins,
     )
     bot.task_manager.claude.session_id = session_id or load_sessions().get(name)
     if model:
@@ -757,6 +821,7 @@ def run_bots(
             disallowed_tools=disallowed_tools,
             trusted_user_id=effective_trusted_id,
             on_trust=on_trust,
+            plugins=proj.plugins or None,
         )
     else:
         names = ", ".join(config.projects.keys())
