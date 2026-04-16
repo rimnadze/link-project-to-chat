@@ -59,6 +59,9 @@ class Plugin:
     #: Unique name matching the entry-point key and config.json "name" field.
     name: str = ""
 
+    #: Names of plugins that must be started before this one.
+    depends_on: list[str] = []
+
     def __init__(self, context: PluginContext, config: dict) -> None:
         self._ctx = context
         self._config = config

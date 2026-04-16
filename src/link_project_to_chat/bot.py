@@ -37,6 +37,23 @@ from .task_manager import Task, TaskManager, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
 
+
+def _topo_sort(plugins: list) -> list:
+    by_name = {p.name: p for p in plugins}
+    result, visited = [], set()
+    def visit(p):
+        if p.name in visited:
+            return
+        visited.add(p.name)
+        for dep in p.depends_on:
+            if dep in by_name:
+                visit(by_name[dep])
+        result.append(p)
+    for p in plugins:
+        visit(p)
+    return result
+
+
 COMMANDS = [
     ("run", "Run a background command"),
     ("tasks", "List all tasks"),
@@ -665,7 +682,7 @@ class ProjectBot(AuthMixin):
                 for bc in cmds:
                     app.add_handler(CommandHandler(bc.command, bc.handler, filters=filters.ChatType.PRIVATE))
 
-        for plugin in self._plugins:
+        for plugin in _topo_sort(self._plugins):
             await plugin.start()
 
         all_commands = list(COMMANDS)

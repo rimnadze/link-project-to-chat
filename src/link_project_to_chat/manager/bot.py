@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import time
 from pathlib import Path
@@ -260,9 +261,25 @@ class ManagerBot(AuthMixin):
             rows.append([InlineKeyboardButton("Logs", callback_data=f"proj_logs_{name}")])
         else:
             rows.append([InlineKeyboardButton("Start", callback_data=f"proj_start_{name}")])
+        rows.append([InlineKeyboardButton("Plugins", callback_data=f"proj_plugins_{name}")])
         rows.append([InlineKeyboardButton("Edit", callback_data=f"proj_edit_{name}")])
         rows.append([InlineKeyboardButton("Remove", callback_data=f"proj_remove_{name}")])
         rows.append([InlineKeyboardButton("« Back", callback_data="proj_back")])
+        return InlineKeyboardMarkup(rows)
+
+    def _available_plugins(self) -> list[str]:
+        eps = importlib.metadata.entry_points(group="lptc.plugins")
+        return sorted(ep.name for ep in eps)
+
+    def _plugins_markup(self, name: str) -> InlineKeyboardMarkup:
+        projects = self._load_projects()
+        active = {p["name"] for p in projects.get(name, {}).get("plugins", [])}
+        available = self._available_plugins()
+        rows = []
+        for plugin_name in available:
+            label = f"✓ {plugin_name}" if plugin_name in active else f"+ {plugin_name}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"proj_ptog_{plugin_name}|{name}")])
+        rows.append([InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")])
         return InlineKeyboardMarkup(rows)
 
     async def _on_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -337,6 +354,43 @@ class ManagerBot(AuthMixin):
                 await query.edit_message_text(
                     f"Enter new value for {field} of '{name}':\n(/cancel to abort)"
                 )
+
+        elif data.startswith("proj_plugins_"):
+            name = data[len("proj_plugins_"):]
+            available = self._available_plugins()
+            if not available:
+                await query.edit_message_text(
+                    f"No plugins installed.\n\nInstall the link-project-to-chat-plugins package to add plugins.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")]]),
+                )
+            else:
+                await query.edit_message_text(
+                    f"Plugins for '{name}':\n✓ = active, + = available\n\nRestart required after changes.",
+                    reply_markup=self._plugins_markup(name),
+                )
+
+        elif data.startswith("proj_ptog_"):
+            suffix = data[len("proj_ptog_"):]
+            plugin_name, name = suffix.rsplit("|", 1)
+            projects = self._load_projects()
+            if name in projects:
+                plugins = projects[name].get("plugins", [])
+                active_names = [p["name"] for p in plugins]
+                if plugin_name in active_names:
+                    plugins = [p for p in plugins if p["name"] != plugin_name]
+                else:
+                    plugins = plugins + [{"name": plugin_name}]
+                projects[name]["plugins"] = plugins
+                self._save_projects(projects)
+            was_running = self._pm.status(name) == "running"
+            if was_running:
+                self._pm.stop(name)
+                self._pm.start(name)
+            note = " Project restarted." if was_running else " Restart project to apply."
+            await query.edit_message_text(
+                f"Plugins for '{name}':\n✓ = active, + = available\n\n{note}",
+                reply_markup=self._plugins_markup(name),
+            )
 
         elif data.startswith("proj_remove_"):
             name = data[len("proj_remove_"):]
