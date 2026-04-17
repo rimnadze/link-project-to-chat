@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
 from collections.abc import Callable
@@ -25,8 +26,6 @@ from .config import (
     patch_project,
     resolve_permissions,
     save_session,
-    save_project_trusted_user_id,
-    save_trusted_user_id,
 )
 from ._auth import AuthMixin
 from .formatting import md_to_telegram, split_html, strip_html
@@ -79,9 +78,7 @@ class ProjectBot(AuthMixin):
         name: str,
         path: Path,
         token: str,
-        allowed_username: str,
-        trusted_user_id: int | None = None,
-        on_trust: Callable[[int], None] | None = None,
+        allowed_users: list[dict],
         skip_permissions: bool = False,
         permission_mode: str | None = None,
         allowed_tools: list[str] | None = None,
@@ -91,18 +88,22 @@ class ProjectBot(AuthMixin):
         self.name = name
         self.path = path.resolve()
         self.token = token
-        self._allowed_username = allowed_username
-        self._trusted_user_id = trusted_user_id
-        self._on_trust_fn = on_trust
+        self._allowed_users = allowed_users or []
         self._started_at = time.monotonic()
         self._app = None
+        self._bot_username: str = ""
+        self._bot_id: int = 0
         self._typing_tasks: dict[int, asyncio.Task] = {}
         self._stream_text: dict[int, str] = {}
         self._thinking_buf: dict[int, str] = {}   # task_id → accumulated thinking
         self._thinking_store: dict[int, str] = {}  # result_msg_id → thinking text
+        self._chat_history: dict[int, collections.deque] = {}   # chat_id → deque of msg dicts
+        self._last_llm_msg_id: dict[int, int] = {}              # chat_id → triggering msg_id of last LLM call
         self._plugins: list[Plugin] = []
         self._plugin_callbacks: dict[str, Callable] = {}
         self._plugin_configs: list[dict] = plugins or []
+        self._shared_ctx: PluginContext | None = None
+        self._last_reload: float = 0.0
         self._init_auth()
         self.task_manager = TaskManager(
             project_path=self.path,
@@ -115,11 +116,61 @@ class ProjectBot(AuthMixin):
             disallowed_tools=disallowed_tools,
         )
 
-    def _on_trust(self, user_id: int) -> None:
-        if self._on_trust_fn:
-            self._on_trust_fn(user_id)
-        else:
-            save_trusted_user_id(user_id)
+    def _on_user_identified(self, user) -> None:
+        """Persist the newly discovered user_id to config and update web server auth."""
+        try:
+            from .config import load_config, DEFAULT_CONFIG
+            import json
+            cfg_path = DEFAULT_CONFIG
+            raw = json.loads(cfg_path.read_text())
+            projects = raw.get("projects", {})
+            proj = projects.get(self.name, {})
+            for u in proj.get("allowed_users", raw.get("allowed_users", [])):
+                if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
+                    u["user_id"] = user.id
+            cfg_path.write_text(json.dumps(raw, indent=2))
+        except Exception:
+            logger.warning("failed to persist user_id for %s", user.username, exc_info=True)
+        if self._shared_ctx is not None:
+            self._shared_ctx.allowed_user_ids = [
+                u["user_id"] for u in self._allowed_users if u.get("user_id")
+            ]
+        logger.info("Learned user_id %d for @%s", user.id, user.username)
+
+    def _reload_if_needed(self) -> None:
+        now = time.monotonic()
+        if now - self._last_reload < 5.0:
+            return
+        self._last_reload = now
+        try:
+            from .config import load_config
+            config = load_config()
+            proj = config.projects.get(self.name)
+            if proj:
+                users = proj.allowed_users or config.allowed_users
+                self._allowed_users = [
+                    {"username": u.username, "user_id": u.user_id, "role": u.role}
+                    for u in users
+                ]
+                if self._shared_ctx is not None:
+                    self._shared_ctx.allowed_user_ids = [
+                        u["user_id"] for u in self._allowed_users if u.get("user_id")
+                    ]
+        except Exception:
+            logger.warning("hot-reload of allowed_users failed", exc_info=True)
+
+    def _record_message(self, chat_id: int, username: str, text: str, msg_id: int) -> None:
+        history = self._chat_history.setdefault(chat_id, collections.deque(maxlen=200))
+        history.append({"from": username, "text": text, "msg_id": msg_id})
+
+    def _context_since_last_llm(self, chat_id: int, before_msg_id: int) -> str:
+        history = self._chat_history.get(chat_id, collections.deque())
+        last_id = self._last_llm_msg_id.get(chat_id, 0)
+        msgs = [m for m in history if last_id < m["msg_id"] < before_msg_id]
+        if not msgs:
+            return ""
+        lines = "\n".join(f"{m['from']}: {m['text']}" for m in msgs)
+        return f"[Recent discussion]\n{lines}\n\n"
 
     async def _on_task_started(self, task: Task) -> None:
         chat = await self._app.bot.get_chat(task.chat_id)
@@ -208,6 +259,9 @@ class ProjectBot(AuthMixin):
         if typing:
             typing.cancel()
 
+        if task.type == TaskType.CLAUDE and task.status != TaskStatus.CANCELLED:
+            self._last_llm_msg_id[task.chat_id] = task.message_id
+
         if task.type == TaskType.CLAUDE:
             if self.task_manager.claude.session_id:
                 save_session(self.name, self.task_manager.claude.session_id)
@@ -224,6 +278,12 @@ class ProjectBot(AuthMixin):
     async def _on_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
             return await update.effective_message.reply_text("Unauthorized.")
+        if ctx.args:
+            payload = ctx.args[0]
+            for plugin in self._plugins:
+                for cmd in plugin.commands():
+                    if cmd.command == payload:
+                        return await cmd.handler(update, ctx)
         await update.effective_message.reply_text(
             f"Project: {self.name}\nPath: {self.path}\n\n"
             f"Send a message to chat with Claude.\n{_CMD_HELP}"
@@ -231,12 +291,41 @@ class ProjectBot(AuthMixin):
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
-        if not msg:
+        if not msg or not update.effective_chat:
             return
-        if not self._auth(update.effective_user):
+        user = update.effective_user
+        if not user or not self._auth(user):
             return await msg.reply_text("Unauthorized.")
-        if self._rate_limited(update.effective_user.id):
+        if self._rate_limited(user.id):
             return await msg.reply_text("Rate limited. Try again shortly.")
+
+        chat_id = update.effective_chat.id
+        text = msg.text or ""
+        username = (user.username or str(user.id))
+        self._record_message(chat_id, username, text, msg.message_id)
+
+        chat_type = update.effective_chat.type
+        if chat_type in ("group", "supergroup"):
+            bot_mention = f"@{self._bot_username}"
+            is_mention = bot_mention.lower() in text.lower()
+            is_reply_to_bot = (
+                msg.reply_to_message
+                and msg.reply_to_message.from_user
+                and msg.reply_to_message.from_user.id == self._bot_id
+            )
+            if not is_mention and not is_reply_to_bot:
+                return
+            prompt = text.replace(bot_mention, "").strip() if is_mention else text
+            if msg.reply_to_message:
+                reply_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+                if reply_text and msg.reply_to_message.from_user:
+                    ru = msg.reply_to_message.from_user
+                    reply_name = ru.username or str(ru.id)
+                    prompt = f"[Replying to {reply_name}: {reply_text}]\n\n{prompt}"
+        else:
+            prompt = text
+            if msg.reply_to_message and msg.reply_to_message.text:
+                prompt = f"[Replying to: {msg.reply_to_message.text}]\n\n{prompt}"
 
         for prev in self.task_manager.find_by_message(msg.message_id):
             self.task_manager.cancel(prev.id)
@@ -244,18 +333,19 @@ class ProjectBot(AuthMixin):
             if typing:
                 typing.cancel()
 
-        prompt = msg.text
-        if msg.reply_to_message and msg.reply_to_message.text:
-            prompt = f"[Replying to: {msg.reply_to_message.text}]\n\n{prompt}"
+        if not self._is_executor(user):
+            return await msg.reply_text("View-only access.")
+
+        context = self._context_since_last_llm(chat_id, msg.message_id)
         self.task_manager.submit_claude(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             message_id=msg.message_id,
-            prompt=prompt,
+            prompt=context + prompt,
         )
 
     async def _on_run(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         if not ctx.args:
             return await update.effective_message.reply_text("Usage: /run <command>")
         command = " ".join(ctx.args)
@@ -310,8 +400,8 @@ class ProjectBot(AuthMixin):
         return self.task_manager.claude.model_display or self.task_manager.claude.model
 
     async def _on_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         await update.effective_message.reply_text(
             f"Current: {self._current_model()}",
             reply_markup=self._model_markup(),
@@ -327,8 +417,8 @@ class ProjectBot(AuthMixin):
         return self.task_manager.claude.effort
 
     async def _on_effort(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         await update.effective_message.reply_text(
             f"Current: {self._current_effort()}",
             reply_markup=self._effort_markup(),
@@ -352,16 +442,16 @@ class ProjectBot(AuthMixin):
         return claude.permission_mode or "default"
 
     async def _on_permissions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         await update.effective_message.reply_text(
             f"Current: {self._current_permission()}",
             reply_markup=self._permissions_markup(),
         )
 
     async def _on_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         if not self.task_manager.claude.session_id:
             return await update.effective_message.reply_text("No active session.")
         self.task_manager.submit_compact(
@@ -379,8 +469,8 @@ class ProjectBot(AuthMixin):
     async def _on_reset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
             return
-        if not self._auth(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized.")
+        if not self._is_executor(update.effective_user):
+            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
         keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -399,9 +489,6 @@ class ProjectBot(AuthMixin):
     ) -> None:
         query = update.callback_query
         if not query or not query.data:
-            return
-        if query.message and query.message.chat.type != "private":
-            await query.answer("Only available in private chats.")
             return
         if not self._auth(query.from_user):
             await query.answer("Unauthorized.")
@@ -459,7 +546,7 @@ class ProjectBot(AuthMixin):
             elapsed = f" | {task.elapsed_human}" if task.elapsed_human else ""
             text = f"#{task.id} [{task.type.value}] {task.status.value}{elapsed}\n{task.input[:200]}"
             rows = []
-            if task.status in (TaskStatus.WAITING, TaskStatus.RUNNING):
+            if task.status in (TaskStatus.WAITING, TaskStatus.RUNNING) and self._is_executor(query.from_user):
                 rows.append([InlineKeyboardButton("Cancel", callback_data=f"task_cancel_{task_id}")])
             if task.status in (TaskStatus.RUNNING, TaskStatus.DONE, TaskStatus.FAILED):
                 rows.append([InlineKeyboardButton("Log", callback_data=f"task_log_{task_id}")])
@@ -470,6 +557,9 @@ class ProjectBot(AuthMixin):
         elif query.data == "tasks_back":
             await self._render_tasks(query.message.chat_id, edit_query=query)
         elif query.data.startswith("task_cancel_"):
+            if not self._is_executor(query.from_user):
+                await query.answer("View-only access.")
+                return
             task_id = _parse_task_id(query.data)
             if self.task_manager.cancel(task_id):
                 typing = self._typing_tasks.pop(task_id, None)
@@ -526,10 +616,27 @@ class ProjectBot(AuthMixin):
         msg = update.effective_message
         if not msg or not update.effective_chat:
             return
-        if not self._auth(update.effective_user):
+        user = update.effective_user
+        if not user or not self._auth(user):
             return await msg.reply_text("Unauthorized.")
-        if self._rate_limited(update.effective_user.id):
+        if self._rate_limited(user.id):
             return await msg.reply_text("Rate limited. Try again shortly.")
+
+        chat_type = update.effective_chat.type
+        if chat_type in ("group", "supergroup"):
+            bot_mention = f"@{self._bot_username}"
+            caption = msg.caption or ""
+            is_mention = bot_mention.lower() in caption.lower()
+            is_reply_to_bot = (
+                msg.reply_to_message
+                and msg.reply_to_message.from_user
+                and msg.reply_to_message.from_user.id == self._bot_id
+            )
+            if not is_mention and not is_reply_to_bot:
+                return
+
+        if not self._is_executor(user):
+            return await msg.reply_text("View-only access.")
 
         uploads_dir = Path("/tmp/link-project-to-chat") / self.name / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -561,7 +668,7 @@ class ProjectBot(AuthMixin):
 
         await file.download_to_drive(str(dest))
 
-        caption = msg.caption or ""
+        caption = (msg.caption or "").replace(f"@{self._bot_username}", "").strip()
         prompt = f"[User uploaded {dest}]"
         if caption:
             prompt += f"\n\n{caption}"
@@ -658,13 +765,22 @@ class ProjectBot(AuthMixin):
         result = await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("delete_webhook result=%s (drop_pending_updates=True)", result)
 
+        bot_info = await app.bot.get_me()
+        self._bot_username = bot_info.username or ""
+        self._bot_id = bot_info.id
+
+        await self.task_manager.start()
+
         shared_ctx = PluginContext(
             bot_name=self.name,
             project_path=self.path,
             bot_token=self.token,
-            trusted_user_id=self._trusted_user_id,
+            bot_username=self._bot_username,
+            trusted_user_id=next((u.get("user_id") for u in self._allowed_users if u.get("user_id")), None),
+            allowed_user_ids=[u["user_id"] for u in self._allowed_users if u.get("user_id")],
             _send=app.bot.send_message,
         )
+        self._shared_ctx = shared_ctx
 
         for cfg in self._plugin_configs:
             pname = cfg.get("name", "")
@@ -680,7 +796,7 @@ class ProjectBot(AuthMixin):
             cmds = plugin.commands()
             if cmds:
                 for bc in cmds:
-                    app.add_handler(CommandHandler(bc.command, bc.handler, filters=filters.ChatType.PRIVATE))
+                    app.add_handler(CommandHandler(bc.command, bc.handler))
 
         for plugin in _topo_sort(self._plugins):
             await plugin.start()
@@ -691,16 +807,16 @@ class ProjectBot(AuthMixin):
                 all_commands.append((bc.command, bc.description))
         await app.bot.set_my_commands(all_commands)
 
-        if self._trusted_user_id:
-            try:
-                await app.bot.send_message(
-                    self._trusted_user_id,
-                    f"Bot started.\nProject: {self.name}\nPath: {self.path}",
-                )
-            except Exception:
-                logger.error("Failed to send startup message", exc_info=True)
+        for u in self._allowed_users:
+            uid = u.get("user_id")
+            if uid:
+                try:
+                    await app.bot.send_message(uid, f"Bot started.\nProject: {self.name}\nPath: {self.path}")
+                except Exception:
+                    logger.error("Failed to send startup message to %s", uid, exc_info=True)
 
     async def _post_shutdown(self, app) -> None:
+        await self.task_manager.stop()
         for plugin in reversed(self._plugins):
             try:
                 await plugin.stop()
@@ -731,16 +847,15 @@ class ProjectBot(AuthMixin):
         }
         private = filters.ChatType.PRIVATE
         for name, handler in handlers.items():
-            app.add_handler(CommandHandler(name, handler, filters=private))
+            app.add_handler(CommandHandler(name, handler))
         text_filter = (
-            private
-            & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE)
+            (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE)
             & filters.TEXT
             & ~filters.COMMAND
         )
         app.add_handler(MessageHandler(text_filter, self._on_text))
 
-        file_filter = private & (filters.Document.ALL | filters.PHOTO)
+        file_filter = filters.Document.ALL | filters.PHOTO
         app.add_handler(MessageHandler(file_filter, self._on_file))
 
         unsupported_filter = private & (
@@ -763,7 +878,7 @@ def run_bot(
     name: str,
     path: Path,
     token: str,
-    username: str,
+    allowed_users: list[dict],
     session_id: str | None = None,
     model: str | None = None,
     effort: str | None = None,
@@ -771,20 +886,16 @@ def run_bot(
     permission_mode: str | None = None,
     allowed_tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
-    trusted_user_id: int | None = None,
-    on_trust: Callable[[int], None] | None = None,
     plugins: list[dict] | None = None,
 ) -> None:
-    if not username:
+    if not allowed_users:
         raise SystemExit(
-            "No allowed username configured. Use --username or run 'configure --username'."
+            "No allowed users configured. Add allowed_users to config.json."
         )
     if session_id:
         save_session(name, session_id)
     bot = ProjectBot(
-        name, path, token, username,
-        trusted_user_id=trusted_user_id,
-        on_trust=on_trust,
+        name, path, token, allowed_users,
         skip_permissions=skip_permissions,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
@@ -798,7 +909,7 @@ def run_bot(
         bot.task_manager.claude.effort = effort
     app = bot.build()
     logger.info(
-        "Bot '%s' started at %s (trusted_user_id=%s)", name, path, trusted_user_id
+        "Bot '%s' started at %s (users=%s)", name, path, [u["username"] for u in allowed_users]
     )
     app.run_polling()
 
@@ -814,30 +925,20 @@ def run_bots(
 ) -> None:
     if len(config.projects) == 1:
         name, proj = next(iter(config.projects.items()))
-        effective_username = proj.allowed_username or config.allowed_username
-        if proj.allowed_username:
-            effective_trusted_id = proj.trusted_user_id
-        else:
-            effective_trusted_id = proj.trusted_user_id if proj.trusted_user_id is not None else config.trusted_user_id
-        on_trust = None
-        if config_path:
-            _name = name
-            _path = config_path
-            on_trust = lambda uid: save_project_trusted_user_id(_name, uid, _path)
+        effective_users = proj.allowed_users or config.allowed_users
+        allowed_users = [{"username": u.username, "user_id": u.user_id, "role": u.role} for u in effective_users]
         proj_skip, proj_pm = resolve_permissions(proj.permissions)
         run_bot(
             name,
             Path(proj.path),
             proj.telegram_bot_token,
-            effective_username,
+            allowed_users,
             model=model or proj.model,
             effort=proj.effort,
             skip_permissions=skip_permissions or proj_skip,
             permission_mode=permission_mode or proj_pm,
             allowed_tools=allowed_tools,
             disallowed_tools=disallowed_tools,
-            trusted_user_id=effective_trusted_id,
-            on_trust=on_trust,
             plugins=proj.plugins or None,
         )
     else:

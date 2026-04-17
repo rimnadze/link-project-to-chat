@@ -36,6 +36,9 @@ class PluginContext:
     project_path: Path
     bot_token: str | None = None
     trusted_user_id: int | None = None
+    allowed_user_ids: list[int] = field(default_factory=list)
+
+    bot_username: str = ""                           # e.g. "my_bot" — set after bot.get_me()
 
     web_port: int | None = None                      # local port of the embedded web server
     public_url: str | None = None                    # public HTTPS URL; set by in-app-web-server

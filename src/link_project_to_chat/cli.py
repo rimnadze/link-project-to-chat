@@ -7,12 +7,10 @@ import click
 
 from .config import (
     DEFAULT_CONFIG,
-    clear_trusted_user_id,
+    AllowedUser,
     load_config,
-    load_trusted_user_id,
     resolve_permissions,
     save_config,
-    save_project_trusted_user_id,
 )
 
 
@@ -167,12 +165,12 @@ def configure(ctx, username: str | None, manager_token: str | None):
     cfg_path = ctx.obj["config_path"]
     config = load_config(cfg_path)
     if username:
-        new_username = username.lower().lstrip("@")
-        if new_username != config.allowed_username:
-            clear_trusted_user_id(cfg_path)
-            click.echo("Trusted user ID cleared (username changed).")
-        config.allowed_username = new_username
-        click.echo(f"Configured username: @{new_username}")
+        uname = username.lower().lstrip("@")
+        if not any(u.username == uname for u in config.allowed_users):
+            config.allowed_users.append(AllowedUser(username=uname))
+            click.echo(f"Added allowed user: @{uname}")
+        else:
+            click.echo(f"User @{uname} already in allowed_users.")
     if manager_token:
         config.manager_telegram_bot_token = manager_token
         click.echo(f"Configured manager token: ***{manager_token[-4:]}")
@@ -248,24 +246,26 @@ def start(
 
     if project_path and token:
         p = Path(project_path).resolve()
+        users = [{"username": username.lower().lstrip("@"), "role": "executor"}] if username else []
         run_bot(
             name=p.name,
             path=p,
             token=token,
-            username=(username or "").lower().lstrip("@"),
+            allowed_users=users,
             session_id=session_id,
             model=model,
             skip_permissions=skip_permissions,
             permission_mode=permission_mode,
             allowed_tools=allowed,
             disallowed_tools=disallowed,
-            trusted_user_id=load_trusted_user_id(cfg_path),
         )
         return
 
     config = load_config(cfg_path)
     if username:
-        config.allowed_username = username.lower().lstrip("@")
+        uname = username.lower().lstrip("@")
+        if not any(u.username == uname for u in config.allowed_users):
+            config.allowed_users.append(AllowedUser(username=uname))
 
     if not config.projects:
         raise SystemExit(
@@ -276,17 +276,14 @@ def start(
         if project not in config.projects:
             raise SystemExit(f"Project '{project}' not found.")
         proj = config.projects[project]
-        effective_username = proj.allowed_username or config.allowed_username
-        if proj.allowed_username:
-            effective_trusted_id = proj.trusted_user_id
-        else:
-            effective_trusted_id = proj.trusted_user_id if proj.trusted_user_id is not None else config.trusted_user_id
+        effective_users = proj.allowed_users or config.allowed_users
+        allowed_users = [{"username": u.username, "user_id": u.user_id, "role": u.role} for u in effective_users]
         proj_skip, proj_pm = resolve_permissions(proj.permissions)
         run_bot(
             project,
             Path(proj.path),
             proj.telegram_bot_token,
-            effective_username,
+            allowed_users,
             session_id=session_id,
             model=model or proj.model,
             effort=proj.effort,
@@ -294,8 +291,6 @@ def start(
             permission_mode=permission_mode or proj_pm,
             allowed_tools=allowed,
             disallowed_tools=disallowed,
-            trusted_user_id=effective_trusted_id,
-            on_trust=lambda uid: save_project_trusted_user_id(project, uid, cfg_path),
             plugins=proj.plugins or None,
         )
     else:
@@ -323,14 +318,15 @@ def start_manager(ctx):
     token = main_config.manager_telegram_bot_token
     if not token:
         raise SystemExit("No manager token configured. Run 'configure --manager-token TOKEN' first.")
-    if not main_config.allowed_username:
-        raise SystemExit("No username configured. Run 'configure --username USER' first.")
+    if not main_config.allowed_users:
+        raise SystemExit("No users configured. Run 'configure --username USER' first.")
 
     pm = ProcessManager(project_config_path=cfg_path)
     restored = pm.start_autostart()
     if restored:
         click.echo(f"Autostarted {restored} project(s).")
 
-    bot = ManagerBot(token, pm, allowed_username=main_config.allowed_username, trusted_user_id=main_config.trusted_user_id, project_config_path=cfg_path)
+    allowed_users = [{"username": u.username, "user_id": u.user_id, "role": u.role} for u in main_config.allowed_users]
+    bot = ManagerBot(token, pm, allowed_users=allowed_users, project_config_path=cfg_path)
     click.echo("Manager bot started.")
     bot.build().run_polling()

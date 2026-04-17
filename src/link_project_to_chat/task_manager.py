@@ -46,7 +46,6 @@ class Task:
     finished_at: float | None = None
     _compact: bool = field(default=False, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
-    _asyncio_task: asyncio.Task | None = field(default=None, repr=False)
     _log: collections.deque = field(
         default_factory=lambda: collections.deque(maxlen=100), repr=False
     )
@@ -85,8 +84,6 @@ class Task:
                 self._proc.kill()
             self.status = TaskStatus.CANCELLED
             self.finished_at = time.monotonic()
-            if self._asyncio_task and not self._asyncio_task.done():
-                self._asyncio_task.cancel()
             return True
         return False
 
@@ -112,6 +109,8 @@ class TaskManager:
         self._on_stream_event = on_stream_event
         self._next_id = 1
         self._tasks: dict[int, Task] = {}
+        self._queue: asyncio.Queue[Task] = asyncio.Queue()
+        self._worker_task: asyncio.Task | None = None
         self._claude = ClaudeClient(
             project_path,
             skip_permissions=skip_permissions,
@@ -124,9 +123,30 @@ class TaskManager:
     def claude(self) -> ClaudeClient:
         return self._claude
 
+    async def start(self) -> None:
+        self._worker_task = asyncio.create_task(self._worker())
+
+    async def stop(self) -> None:
+        if self._worker_task:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _worker(self) -> None:
+        while True:
+            task = await self._queue.get()
+            if task.status == TaskStatus.CANCELLED:
+                continue
+            if task.type == TaskType.CLAUDE:
+                await self._exec_claude(task)
+            else:
+                await self._exec_command(task)
+
     def _submit(self, task: Task) -> Task:
         self._tasks[task.id] = task
-        task._asyncio_task = asyncio.create_task(self._exec_claude(task))
+        self._queue.put_nowait(task)
         return task
 
     def submit_claude(self, chat_id: int, message_id: int, prompt: str) -> Task:
@@ -163,14 +183,10 @@ class TaskManager:
             message_id=message_id,
             type=TaskType.COMMAND,
             input=command,
-            name=name or command.split()[0] if command else f"task-{self._next_id}",
-            status=TaskStatus.RUNNING,
-            started_at=time.monotonic(),
+            name=name or (command.split()[0] if command else f"task-{self._next_id}"),
         )
         self._next_id += 1
-        self._tasks[task.id] = task
-        task._asyncio_task = asyncio.create_task(self._exec_command(task))
-        return task
+        return self._submit(task)
 
     async def _exec_claude(self, task: Task) -> None:
         task.status = TaskStatus.RUNNING
@@ -237,6 +253,8 @@ class TaskManager:
         return summary
 
     async def _exec_command(self, task: Task) -> None:
+        task.status = TaskStatus.RUNNING
+        task.started_at = time.monotonic()
         await self._safe_callback(self._on_task_started, task)
         proc = subprocess.Popen(
             task.input,

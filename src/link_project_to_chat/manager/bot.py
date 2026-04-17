@@ -18,7 +18,6 @@ from telegram.ext import (
 
 from .config import load_project_configs, save_project_configs
 from .process import ProcessManager
-from ..config import DEFAULT_CONFIG, save_trusted_user_id
 from .._auth import AuthMixin
 
 logger = logging.getLogger(__name__)
@@ -32,9 +31,10 @@ COMMANDS = [
     ("help", "Show commands"),
 ]
 
-_EDITABLE_FIELDS = ("name", "path", "token", "username", "model", "permissions")
-# Fields shown as edit buttons (subset — simpler types only)
-_BUTTON_EDIT_FIELDS = ("name", "path", "token", "username", "model", "permissions")
+_EDITABLE_FIELDS = ("name", "path", "token", "model", "permissions")
+_BUTTON_EDIT_FIELDS = ("name", "path", "token", "model", "permissions")
+
+_ROLES = ("viewer", "executor")
 
 
 def _parse_edit_callback(data: str) -> tuple[str, str] | None:
@@ -54,22 +54,45 @@ class ManagerBot(AuthMixin):
         self,
         token: str,
         process_manager: ProcessManager,
-        allowed_username: str,
-        trusted_user_id: int | None = None,
+        allowed_users: list[dict],
         project_config_path: Path | None = None,
     ):
         self._token = token
         self._pm = process_manager
-        self._allowed_username = allowed_username
-        self._trusted_user_id = trusted_user_id
+        self._allowed_users = allowed_users or []
         self._started_at = time.monotonic()
         self._app = None
         self._project_config_path = project_config_path
+        self._last_reload: float = 0.0
         self._init_auth()
 
-    def _on_trust(self, user_id: int) -> None:
-        path = self._project_config_path or DEFAULT_CONFIG
-        save_trusted_user_id(user_id, path)
+    def _on_user_identified(self, user) -> None:
+        try:
+            from ..config import DEFAULT_CONFIG
+            import json
+            raw = json.loads(DEFAULT_CONFIG.read_text())
+            for u in raw.get("allowed_users", []):
+                if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
+                    u["user_id"] = user.id
+            DEFAULT_CONFIG.write_text(json.dumps(raw, indent=2))
+        except Exception:
+            logger.warning("failed to persist user_id for %s", user.username, exc_info=True)
+        logger.info("Learned user_id %d for @%s", user.id, user.username)
+
+    def _reload_if_needed(self) -> None:
+        now = time.monotonic()
+        if now - self._last_reload < 5.0:
+            return
+        self._last_reload = now
+        try:
+            from ..config import load_config
+            config = load_config()
+            self._allowed_users = [
+                {"username": u.username, "user_id": u.user_id, "role": u.role}
+                for u in config.allowed_users
+            ]
+        except Exception:
+            logger.warning("hot-reload of allowed_users failed", exc_info=True)
 
     def _load_projects(self) -> dict[str, dict]:
         path = self._project_config_path
@@ -231,7 +254,7 @@ class ManagerBot(AuthMixin):
             projects[name]["telegram_bot_token"] = value
             self._save_projects(projects)
             await update.effective_message.reply_text(f"Updated '{name}' token.")
-        elif field in ("username", "model", "permissions"):
+        elif field in ("model", "permissions"):
             projects[name][field] = value
             self._save_projects(projects)
             await update.effective_message.reply_text(f"Updated '{name}' {field} to {value}.")
@@ -241,6 +264,23 @@ class ManagerBot(AuthMixin):
             )
 
     async def _edit_field_save(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        adding = ctx.user_data.get("adding_user")
+        if adding and adding.get("step") == "username":
+            if not self._auth(update.effective_user):
+                return
+            username = update.message.text.strip().lstrip("@").lower()
+            adding["username"] = username
+            adding["step"] = "role"
+            rows = [
+                [InlineKeyboardButton(r, callback_data=f"proj_urole_set_{username}|{adding['project']}|{r}")]
+                for r in _ROLES
+            ]
+            rows.append([InlineKeyboardButton("Cancel", callback_data=f"proj_users_{adding['project']}")])
+            await update.message.reply_text(
+                f"Choose role for @{username}:", reply_markup=InlineKeyboardMarkup(rows)
+            )
+            return
+
         pending = ctx.user_data.get("pending_edit")
         if not pending:
             return
@@ -252,7 +292,8 @@ class ManagerBot(AuthMixin):
     @staticmethod
     async def _edit_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ctx.user_data.pop("pending_edit", None)
-        await update.effective_message.reply_text("Edit cancelled.")
+        ctx.user_data.pop("adding_user", None)
+        await update.effective_message.reply_text("Cancelled.")
 
     def _proj_detail_markup(self, name: str, status: str) -> InlineKeyboardMarkup:
         rows = []
@@ -261,10 +302,26 @@ class ManagerBot(AuthMixin):
             rows.append([InlineKeyboardButton("Logs", callback_data=f"proj_logs_{name}")])
         else:
             rows.append([InlineKeyboardButton("Start", callback_data=f"proj_start_{name}")])
+        rows.append([InlineKeyboardButton("Users", callback_data=f"proj_users_{name}")])
         rows.append([InlineKeyboardButton("Plugins", callback_data=f"proj_plugins_{name}")])
         rows.append([InlineKeyboardButton("Edit", callback_data=f"proj_edit_{name}")])
         rows.append([InlineKeyboardButton("Remove", callback_data=f"proj_remove_{name}")])
         rows.append([InlineKeyboardButton("« Back", callback_data="proj_back")])
+        return InlineKeyboardMarkup(rows)
+
+    def _users_markup(self, name: str) -> InlineKeyboardMarkup:
+        projects = self._load_projects()
+        users = projects.get(name, {}).get("allowed_users", [])
+        rows = []
+        for u in users:
+            username = u["username"]
+            role = u.get("role", "viewer")
+            rows.append([
+                InlineKeyboardButton(f"@{username} — {role}", callback_data=f"proj_urole_{username}|{name}"),
+                InlineKeyboardButton("✕", callback_data=f"proj_urem_{username}|{name}"),
+            ])
+        rows.append([InlineKeyboardButton("+ Add user", callback_data=f"proj_uadd_{name}")])
+        rows.append([InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")])
         return InlineKeyboardMarkup(rows)
 
     def _available_plugins(self) -> list[str]:
@@ -354,6 +411,66 @@ class ManagerBot(AuthMixin):
                 await query.edit_message_text(
                     f"Enter new value for {field} of '{name}':\n(/cancel to abort)"
                 )
+
+        elif data.startswith("proj_users_"):
+            name = data[len("proj_users_"):]
+            await query.edit_message_text(
+                f"Users for '{name}':", reply_markup=self._users_markup(name)
+            )
+
+        elif data.startswith("proj_urole_set_"):
+            suffix = data[len("proj_urole_set_"):]
+            username, name, role = suffix.rsplit("|", 2)
+            ctx.user_data.pop("adding_user", None)
+            projects = self._load_projects()
+            if name in projects:
+                users = projects[name].get("allowed_users", [])
+                existing = next((u for u in users if u["username"] == username), None)
+                if existing:
+                    existing["role"] = role
+                else:
+                    users.append({"username": username, "role": role})
+                projects[name]["allowed_users"] = users
+                self._save_projects(projects)
+            await query.edit_message_text(
+                f"Users for '{name}':", reply_markup=self._users_markup(name)
+            )
+
+        elif data.startswith("proj_urole_"):
+            suffix = data[len("proj_urole_"):]
+            username, name = suffix.rsplit("|", 1)
+            projects = self._load_projects()
+            if name in projects:
+                users = projects[name].get("allowed_users", [])
+                for u in users:
+                    if u["username"] == username:
+                        current = u.get("role", "viewer")
+                        u["role"] = "executor" if current == "viewer" else "viewer"
+                        break
+                projects[name]["allowed_users"] = users
+                self._save_projects(projects)
+            await query.edit_message_text(
+                f"Users for '{name}':", reply_markup=self._users_markup(name)
+            )
+
+        elif data.startswith("proj_urem_"):
+            suffix = data[len("proj_urem_"):]
+            username, name = suffix.rsplit("|", 1)
+            projects = self._load_projects()
+            if name in projects:
+                users = [u for u in projects[name].get("allowed_users", []) if u["username"] != username]
+                projects[name]["allowed_users"] = users
+                self._save_projects(projects)
+            await query.edit_message_text(
+                f"Users for '{name}':", reply_markup=self._users_markup(name)
+            )
+
+        elif data.startswith("proj_uadd_"):
+            name = data[len("proj_uadd_"):]
+            ctx.user_data["adding_user"] = {"project": name, "step": "username"}
+            await query.edit_message_text(
+                f"Adding user to '{name}'.\n\nEnter username (without @):\n(/cancel to abort)"
+            )
 
         elif data.startswith("proj_plugins_"):
             name = data[len("proj_plugins_"):]
