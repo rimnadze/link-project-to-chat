@@ -27,7 +27,7 @@ from .config import (
     resolve_permissions,
     save_session,
 )
-from ._auth import AuthMixin
+from ._auth import AuthMixin, _config_write_lock
 from .formatting import md_to_telegram, split_html, strip_html
 from .claude_client import EFFORT_LEVELS, MODELS, PERMISSION_MODES
 from .plugin import Plugin, PluginContext, load_plugin
@@ -119,16 +119,17 @@ class ProjectBot(AuthMixin):
     def _on_user_identified(self, user) -> None:
         """Persist the newly discovered user_id to config and update web server auth."""
         try:
-            from .config import load_config, DEFAULT_CONFIG
+            from .config import DEFAULT_CONFIG
             import json
             cfg_path = DEFAULT_CONFIG
-            raw = json.loads(cfg_path.read_text())
-            projects = raw.get("projects", {})
-            proj = projects.get(self.name, {})
-            for u in proj.get("allowed_users", raw.get("allowed_users", [])):
-                if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
-                    u["user_id"] = user.id
-            cfg_path.write_text(json.dumps(raw, indent=2))
+            with _config_write_lock:
+                raw = json.loads(cfg_path.read_text())
+                projects = raw.get("projects", {})
+                proj = projects.get(self.name, {})
+                for u in proj.get("allowed_users", raw.get("allowed_users", [])):
+                    if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
+                        u["user_id"] = user.id
+                cfg_path.write_text(json.dumps(raw, indent=2))
         except Exception:
             logger.warning("failed to persist user_id for %s", user.username, exc_info=True)
         if self._shared_ctx is not None:

@@ -2,49 +2,54 @@ from __future__ import annotations
 
 import collections
 import logging
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
+_config_write_lock = threading.Lock()
+
 
 class AuthMixin:
-    """Username-based auth with brute-force protection and rate limiting."""
+    """Username + user_id based auth with rate limiting."""
 
-    _allowed_users: list = []  # list of {"username": str, "user_id": int | None}
+    _allowed_users: list = []  # list of {"username": str, "user_id": int | None, "role": str}
     _MAX_MESSAGES_PER_MINUTE: int = 30
 
     def _init_auth(self) -> None:
         self._rate_limits: dict[int, collections.deque] = {}
-        self._failed_auth_counts: dict[int, int] = {}
 
     def _reload_if_needed(self) -> None:
         """Override in subclasses to hot-reload allowed_users from config."""
 
     def _on_user_identified(self, user) -> None:
-        """Called when a user is matched by username for the first time (user_id was unknown).
-        Override in subclasses to persist the discovered user_id."""
+        """Called when user_id is learned for the first time. Override to persist."""
 
     def _get_role(self, user) -> str | None:
         """Returns the user's role ('viewer' or 'executor'), or None if unauthorized."""
-        if self._failed_auth_counts.get(user.id, 0) >= 5:
-            return None
         username = (user.username or "").lower().lstrip("@")
         for u in self._allowed_users:
-            if u["username"] == username:
-                if not u.get("user_id"):
-                    u["user_id"] = user.id
-                    self._on_user_identified(user)
-                return u.get("role", "viewer")
+            if u["username"] != username:
+                continue
+            stored_id = u.get("user_id")
+            if stored_id and stored_id != user.id:
+                return None  # username matches but user_id doesn't — reject
+            if not stored_id:
+                u["user_id"] = user.id
+                self._on_user_identified(user)
+            return u.get("role", "viewer")
         # Not found — try reloading config once, then check again
         self._reload_if_needed()
         for u in self._allowed_users:
-            if u["username"] == username:
-                self._failed_auth_counts.pop(user.id, None)  # clear prior failures
-                if not u.get("user_id"):
-                    u["user_id"] = user.id
-                    self._on_user_identified(user)
-                return u.get("role", "viewer")
-        self._failed_auth_counts[user.id] = self._failed_auth_counts.get(user.id, 0) + 1
+            if u["username"] != username:
+                continue
+            stored_id = u.get("user_id")
+            if stored_id and stored_id != user.id:
+                return None
+            if not stored_id:
+                u["user_id"] = user.id
+                self._on_user_identified(user)
+            return u.get("role", "viewer")
         return None
 
     def _auth(self, user) -> bool:

@@ -18,7 +18,7 @@ from telegram.ext import (
 
 from .config import load_project_configs, save_project_configs
 from .process import ProcessManager
-from .._auth import AuthMixin
+from .._auth import AuthMixin, _config_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +70,12 @@ class ManagerBot(AuthMixin):
         try:
             from ..config import DEFAULT_CONFIG
             import json
-            raw = json.loads(DEFAULT_CONFIG.read_text())
-            for u in raw.get("allowed_users", []):
-                if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
-                    u["user_id"] = user.id
-            DEFAULT_CONFIG.write_text(json.dumps(raw, indent=2))
+            with _config_write_lock:
+                raw = json.loads(DEFAULT_CONFIG.read_text())
+                for u in raw.get("allowed_users", []):
+                    if u.get("username") == (user.username or "").lower().lstrip("@") and not u.get("user_id"):
+                        u["user_id"] = user.id
+                DEFAULT_CONFIG.write_text(json.dumps(raw, indent=2))
         except Exception:
             logger.warning("failed to persist user_id for %s", user.username, exc_info=True)
         logger.info("Learned user_id %d for @%s", user.id, user.username)
