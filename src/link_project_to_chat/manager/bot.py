@@ -510,13 +510,11 @@ class ManagerBot(AuthMixin):
         await app.bot.delete_webhook(drop_pending_updates=True)
         await app.bot.set_my_commands(COMMANDS)
 
-    def build(self):
-        app = (
-            ApplicationBuilder()
-            .token(self._token)
-            .post_init(self._post_init)
-            .build()
-        )
+    def build(self, post_stop=None):
+        builder = ApplicationBuilder().token(self._token).post_init(self._post_init)
+        if post_stop:
+            builder = builder.post_stop(post_stop)
+        app = builder.build()
         self._app = app
         for name, handler in {
             "projects": self._on_projects,

@@ -4,6 +4,7 @@ import collections
 import logging
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -105,7 +106,22 @@ class ProcessManager:
         return sum(1 for name in self._load_projects() if self.start(name))
 
     def stop_all(self) -> int:
-        return sum(1 for name in list(self._processes) if self.stop(name))
+        running = {name: proc for name, proc in self._processes.items() if proc.poll() is None}
+        for proc in running.values():
+            proc.terminate()
+        deadline = time.monotonic() + 5
+        for proc in running.values():
+            remaining = max(0.1, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        for name in running:
+            self._processes.pop(name, None)
+            self._log_threads.pop(name, None)
+            logger.info("Stopped %s", name)
+        return len(running)
 
     def start_autostart(self) -> int:
         """Start all projects that have autostart=true in config."""

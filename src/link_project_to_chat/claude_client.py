@@ -18,7 +18,7 @@ PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions", "dontAsk", "p
 DEFAULT_MODEL = "sonnet"
 
 
-SYSTEM_PROMPT = "Only make changes or run commands when explicitly asked to modify a specific file or perform a specific task. For questions, analysis, or discussion — answer only, do not act. If you identify something that could be fixed or improved, describe what and why, then ask for approval before doing anything. Do not run, start, stop, or restart anything unless explicitly asked."
+SYSTEM_PROMPT = "<important>Only make changes or run commands when explicitly asked to modify a specific file or perform a specific task. For questions, analysis, or discussion — answer only, do not act. If you identify something that could be fixed or improved, describe what and why, then ask for approval before doing anything. Do not run, start, stop, or restart anything unless explicitly asked. Do not install packages, run scripts, or restart services unless explicitly asked in the current message.</important>"
 
 
 class ClaudeClient:

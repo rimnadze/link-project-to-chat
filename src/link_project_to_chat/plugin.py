@@ -101,6 +101,20 @@ class Plugin:
     async def on_tool_use(self, tool: str, path: str | None) -> None:
         """Called when Claude uses a tool during a task (e.g. Write, Edit)."""
 
+    # ── claude integration ────────────────────────────────────────────────────
+
+    def get_context(self) -> str | None:
+        """Text prepended to Claude's prompt before each task. Return None to skip."""
+        return None
+
+    def tools(self) -> list[dict]:
+        """Tool definitions available to Claude (schema only, for documentation)."""
+        return []
+
+    async def call_tool(self, name: str, args: dict) -> str:
+        """Execute a plugin tool. Called via CLI (claude uses Bash to invoke it)."""
+        return f"Unknown tool: {name}"
+
     # ── registration ─────────────────────────────────────────────────────────
 
     def commands(self) -> list[BotCommand]:

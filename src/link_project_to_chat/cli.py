@@ -306,6 +306,31 @@ def start(
         )
 
 
+@main.command("plugin-call")
+@click.option("--project", required=True, help="Project name as in config.json")
+@click.argument("plugin_name")
+@click.argument("tool_name")
+@click.argument("args_json", default="{}")
+@click.pass_context
+def plugin_call(ctx, project: str, plugin_name: str, tool_name: str, args_json: str):
+    """Call a plugin tool from the command line (used by Claude via Bash)."""
+    import asyncio
+    import json
+
+    from .config import resolve_project_meta_dir
+    from .plugin import PluginContext, load_plugin
+
+    config = load_config(ctx.obj["config_path"])
+    data_dir = resolve_project_meta_dir(config.meta_dir, project)
+    plugin_ctx = PluginContext(bot_name=project, project_path=Path("."), data_dir=data_dir)
+    plugin = load_plugin(plugin_name, plugin_ctx, {})
+    if not plugin:
+        raise SystemExit(f"Plugin {plugin_name!r} not found.")
+    args = json.loads(args_json)
+    result = asyncio.run(plugin.call_tool(tool_name, args))
+    click.echo(result)
+
+
 @main.command("start-manager")
 @click.pass_context
 def start_manager(ctx):
@@ -330,4 +355,7 @@ def start_manager(ctx):
     allowed_users = [{"username": u.username, "user_id": u.user_id, "role": u.role} for u in main_config.allowed_users]
     bot = ManagerBot(token, pm, allowed_users=allowed_users, project_config_path=cfg_path)
     click.echo("Manager bot started.")
-    bot.build().run_polling()
+    async def _stop_all(app):
+        pm.stop_all()
+
+    bot.build(post_stop=_stop_all).run_polling()

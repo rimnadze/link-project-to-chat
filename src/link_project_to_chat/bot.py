@@ -348,10 +348,12 @@ class ProjectBot(AuthMixin):
             return await msg.reply_text("View-only access.")
 
         context = self._context_since_last_llm(chat_id, msg.message_id)
+        plugin_ctx = "\n\n".join(c for p in self._plugins if (c := p.get_context()))
+        full_prompt = (plugin_ctx + "\n\n---\n\n" if plugin_ctx else "") + context + prompt
         self.task_manager.submit_claude(
             chat_id=chat_id,
             message_id=msg.message_id,
-            prompt=context + prompt,
+            prompt=full_prompt,
         )
 
     async def _on_run(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
