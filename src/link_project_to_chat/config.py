@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_CONFIG = Path.home() / ".link-project-to-chat" / "config.json"
+DEFAULT_META_DIR = DEFAULT_CONFIG.parent / "meta"
+
+
+def resolve_project_meta_dir(meta_dir: Path, project_name: str) -> Path:
+    path = meta_dir / project_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @dataclass
@@ -32,6 +39,7 @@ class Config:
     allowed_users: list[AllowedUser] = field(default_factory=list)
     manager_telegram_bot_token: str = ""
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    meta_dir: Path = field(default_factory=lambda: DEFAULT_META_DIR)
 
 
 def _parse_allowed_users(data: list[dict]) -> list[AllowedUser]:
@@ -78,6 +86,8 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Config:
         return config
     raw = json.loads(path.read_text())
     config.allowed_users = _parse_allowed_users(raw.get("allowed_users", []))
+    if "meta_dir" in raw:
+        config.meta_dir = Path(raw["meta_dir"]).expanduser()
     config.manager_telegram_bot_token = raw.get(
         "manager_telegram_bot_token", raw.get("manager_bot_token", "")
     )
@@ -107,6 +117,10 @@ def save_config(config: Config, path: Path = DEFAULT_CONFIG) -> None:
             pass
     raw["allowed_users"] = _serialize_allowed_users(config.allowed_users)
     raw["manager_telegram_bot_token"] = config.manager_telegram_bot_token
+    if config.meta_dir != DEFAULT_META_DIR:
+        raw["meta_dir"] = str(config.meta_dir)
+    else:
+        raw.pop("meta_dir", None)
     # Remove old keys
     for old in ("allowed_username", "trusted_user_id", "manager_bot_token"):
         raw.pop(old, None)

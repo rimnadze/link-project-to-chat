@@ -340,6 +340,129 @@ class ManagerBot(AuthMixin):
         rows.append([InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")])
         return InlineKeyboardMarkup(rows)
 
+    async def _cb_proj_info(self, query, name: str) -> None:
+        status = self._pm.status(name)
+        await query.edit_message_text(f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status))
+
+    async def _cb_proj_back(self, query) -> None:
+        markup = self._list_markup()
+        await query.edit_message_text(self._projects_text() if markup else "No projects configured.", reply_markup=markup)
+
+    async def _cb_proj_start(self, query, name: str) -> None:
+        self._pm.start(name)
+        status = self._pm.status(name)
+        await query.edit_message_text(f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status))
+
+    async def _cb_proj_stop(self, query, name: str) -> None:
+        self._pm.stop(name)
+        status = self._pm.status(name)
+        await query.edit_message_text(f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status))
+
+    async def _cb_proj_logs(self, query, name: str) -> None:
+        output = self._pm.logs(name)
+        if len(output) > 3500:
+            output = output[-3500:]
+        escaped = output.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        rows = [[InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")]]
+        await query.edit_message_text(f"<pre>{escaped}</pre>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _cb_proj_edit(self, query, name: str) -> None:
+        rows = [
+            [InlineKeyboardButton(field.capitalize().replace("_", " "), callback_data=f"proj_efld_{field}_{name}")]
+            for field in _BUTTON_EDIT_FIELDS
+        ]
+        rows.append([InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")])
+        await query.edit_message_text(f"Edit '{name}' — choose field:", reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _cb_proj_efld(self, query, ctx, data: str) -> None:
+        parsed = _parse_edit_callback(data)
+        if parsed:
+            field, name = parsed
+            ctx.user_data["pending_edit"] = {"name": name, "field": field}
+            await query.edit_message_text(f"Enter new value for {field} of '{name}':\n(/cancel to abort)")
+
+    async def _cb_proj_users(self, query, name: str) -> None:
+        await query.edit_message_text(f"Users for '{name}':", reply_markup=self._users_markup(name))
+
+    async def _cb_proj_urole_set(self, query, ctx, suffix: str) -> None:
+        username, name, role = suffix.rsplit("|", 2)
+        ctx.user_data.pop("adding_user", None)
+        projects = self._load_projects()
+        if name in projects:
+            users = projects[name].get("allowed_users", [])
+            existing = next((u for u in users if u["username"] == username), None)
+            if existing:
+                existing["role"] = role
+            else:
+                users.append({"username": username, "role": role})
+            projects[name]["allowed_users"] = users
+            self._save_projects(projects)
+        await query.edit_message_text(f"Users for '{name}':", reply_markup=self._users_markup(name))
+
+    async def _cb_proj_urole(self, query, suffix: str) -> None:
+        username, name = suffix.rsplit("|", 1)
+        projects = self._load_projects()
+        if name in projects:
+            users = projects[name].get("allowed_users", [])
+            for u in users:
+                if u["username"] == username:
+                    u["role"] = "executor" if u.get("role", "viewer") == "viewer" else "viewer"
+                    break
+            projects[name]["allowed_users"] = users
+            self._save_projects(projects)
+        await query.edit_message_text(f"Users for '{name}':", reply_markup=self._users_markup(name))
+
+    async def _cb_proj_urem(self, query, suffix: str) -> None:
+        username, name = suffix.rsplit("|", 1)
+        projects = self._load_projects()
+        if name in projects:
+            projects[name]["allowed_users"] = [u for u in projects[name].get("allowed_users", []) if u["username"] != username]
+            self._save_projects(projects)
+        await query.edit_message_text(f"Users for '{name}':", reply_markup=self._users_markup(name))
+
+    async def _cb_proj_uadd(self, query, ctx, name: str) -> None:
+        ctx.user_data["adding_user"] = {"project": name, "step": "username"}
+        await query.edit_message_text(f"Adding user to '{name}'.\n\nEnter username (without @):\n(/cancel to abort)")
+
+    async def _cb_proj_plugins(self, query, name: str) -> None:
+        available = self._available_plugins()
+        if not available:
+            rows = [[InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")]]
+            await query.edit_message_text(
+                "No plugins installed.\n\nInstall the link-project-to-chat-plugins package to add plugins.",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        else:
+            await query.edit_message_text(
+                f"Plugins for '{name}':\n✓ = active, + = available\n\nRestart required after changes.",
+                reply_markup=self._plugins_markup(name),
+            )
+
+    async def _cb_proj_ptog(self, query, suffix: str) -> None:
+        plugin_name, name = suffix.rsplit("|", 1)
+        projects = self._load_projects()
+        if name in projects:
+            plugins = projects[name].get("plugins", [])
+            active_names = [p["name"] for p in plugins]
+            plugins = [p for p in plugins if p["name"] != plugin_name] if plugin_name in active_names else plugins + [{"name": plugin_name}]
+            projects[name]["plugins"] = plugins
+            self._save_projects(projects)
+        was_running = self._pm.status(name) == "running"
+        if was_running:
+            self._pm.stop(name)
+            self._pm.start(name)
+        note = " Project restarted." if was_running else " Restart project to apply."
+        await query.edit_message_text(f"Plugins for '{name}':\n✓ = active, + = available\n\n{note}", reply_markup=self._plugins_markup(name))
+
+    async def _cb_proj_remove(self, query, name: str) -> None:
+        projects = self._load_projects()
+        if name in projects:
+            self._pm.stop(name)
+            del projects[name]
+            self._save_projects(projects)
+        markup = self._list_markup()
+        await query.edit_message_text(self._projects_text() if markup else "No projects configured.", reply_markup=markup)
+
     async def _on_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.data:
@@ -348,179 +471,39 @@ class ManagerBot(AuthMixin):
             await query.answer("Unauthorized.")
             return
         await query.answer()
-        # Any button press cancels a pending inline edit
         ctx.user_data.pop("pending_edit", None)
 
         data = query.data
-
         if data.startswith("proj_info_"):
-            name = data[len("proj_info_"):]
-            status = self._pm.status(name)
-            await query.edit_message_text(
-                f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status)
-            )
-
+            await self._cb_proj_info(query, data[len("proj_info_"):])
         elif data == "proj_back":
-            markup = self._list_markup()
-            await query.edit_message_text(
-                self._projects_text() if markup else "No projects configured.", reply_markup=markup
-            )
-
+            await self._cb_proj_back(query)
         elif data.startswith("proj_start_"):
-            name = data[len("proj_start_"):]
-            self._pm.start(name)
-            status = self._pm.status(name)
-            await query.edit_message_text(
-                f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status)
-            )
-
+            await self._cb_proj_start(query, data[len("proj_start_"):])
         elif data.startswith("proj_stop_"):
-            name = data[len("proj_stop_"):]
-            self._pm.stop(name)
-            status = self._pm.status(name)
-            await query.edit_message_text(
-                f"{name}: {status}", reply_markup=self._proj_detail_markup(name, status)
-            )
-
+            await self._cb_proj_stop(query, data[len("proj_stop_"):])
         elif data.startswith("proj_logs_"):
-            name = data[len("proj_logs_"):]
-            output = self._pm.logs(name)
-            if len(output) > 3500:
-                output = output[-3500:]
-            escaped = output.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            rows = [[InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")]]
-            await query.edit_message_text(
-                f"<pre>{escaped}</pre>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
-            )
-
+            await self._cb_proj_logs(query, data[len("proj_logs_"):])
         elif data.startswith("proj_edit_"):
-            name = data[len("proj_edit_"):]
-            rows = [
-                [InlineKeyboardButton(field.capitalize().replace("_", " "), callback_data=f"proj_efld_{field}_{name}")]
-                for field in _BUTTON_EDIT_FIELDS
-            ]
-            rows.append([InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")])
-            await query.edit_message_text(
-                f"Edit '{name}' — choose field:", reply_markup=InlineKeyboardMarkup(rows)
-            )
-
+            await self._cb_proj_edit(query, data[len("proj_edit_"):])
         elif data.startswith("proj_efld_"):
-            parsed = _parse_edit_callback(data)
-            if parsed:
-                field, name = parsed
-                ctx.user_data["pending_edit"] = {"name": name, "field": field}
-                await query.edit_message_text(
-                    f"Enter new value for {field} of '{name}':\n(/cancel to abort)"
-                )
-
+            await self._cb_proj_efld(query, ctx, data)
         elif data.startswith("proj_users_"):
-            name = data[len("proj_users_"):]
-            await query.edit_message_text(
-                f"Users for '{name}':", reply_markup=self._users_markup(name)
-            )
-
+            await self._cb_proj_users(query, data[len("proj_users_"):])
         elif data.startswith("proj_urole_set_"):
-            suffix = data[len("proj_urole_set_"):]
-            username, name, role = suffix.rsplit("|", 2)
-            ctx.user_data.pop("adding_user", None)
-            projects = self._load_projects()
-            if name in projects:
-                users = projects[name].get("allowed_users", [])
-                existing = next((u for u in users if u["username"] == username), None)
-                if existing:
-                    existing["role"] = role
-                else:
-                    users.append({"username": username, "role": role})
-                projects[name]["allowed_users"] = users
-                self._save_projects(projects)
-            await query.edit_message_text(
-                f"Users for '{name}':", reply_markup=self._users_markup(name)
-            )
-
+            await self._cb_proj_urole_set(query, ctx, data[len("proj_urole_set_"):])
         elif data.startswith("proj_urole_"):
-            suffix = data[len("proj_urole_"):]
-            username, name = suffix.rsplit("|", 1)
-            projects = self._load_projects()
-            if name in projects:
-                users = projects[name].get("allowed_users", [])
-                for u in users:
-                    if u["username"] == username:
-                        current = u.get("role", "viewer")
-                        u["role"] = "executor" if current == "viewer" else "viewer"
-                        break
-                projects[name]["allowed_users"] = users
-                self._save_projects(projects)
-            await query.edit_message_text(
-                f"Users for '{name}':", reply_markup=self._users_markup(name)
-            )
-
+            await self._cb_proj_urole(query, data[len("proj_urole_"):])
         elif data.startswith("proj_urem_"):
-            suffix = data[len("proj_urem_"):]
-            username, name = suffix.rsplit("|", 1)
-            projects = self._load_projects()
-            if name in projects:
-                users = [u for u in projects[name].get("allowed_users", []) if u["username"] != username]
-                projects[name]["allowed_users"] = users
-                self._save_projects(projects)
-            await query.edit_message_text(
-                f"Users for '{name}':", reply_markup=self._users_markup(name)
-            )
-
+            await self._cb_proj_urem(query, data[len("proj_urem_"):])
         elif data.startswith("proj_uadd_"):
-            name = data[len("proj_uadd_"):]
-            ctx.user_data["adding_user"] = {"project": name, "step": "username"}
-            await query.edit_message_text(
-                f"Adding user to '{name}'.\n\nEnter username (without @):\n(/cancel to abort)"
-            )
-
+            await self._cb_proj_uadd(query, ctx, data[len("proj_uadd_"):])
         elif data.startswith("proj_plugins_"):
-            name = data[len("proj_plugins_"):]
-            available = self._available_plugins()
-            if not available:
-                await query.edit_message_text(
-                    f"No plugins installed.\n\nInstall the link-project-to-chat-plugins package to add plugins.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"proj_info_{name}")]]),
-                )
-            else:
-                await query.edit_message_text(
-                    f"Plugins for '{name}':\n✓ = active, + = available\n\nRestart required after changes.",
-                    reply_markup=self._plugins_markup(name),
-                )
-
+            await self._cb_proj_plugins(query, data[len("proj_plugins_"):])
         elif data.startswith("proj_ptog_"):
-            suffix = data[len("proj_ptog_"):]
-            plugin_name, name = suffix.rsplit("|", 1)
-            projects = self._load_projects()
-            if name in projects:
-                plugins = projects[name].get("plugins", [])
-                active_names = [p["name"] for p in plugins]
-                if plugin_name in active_names:
-                    plugins = [p for p in plugins if p["name"] != plugin_name]
-                else:
-                    plugins = plugins + [{"name": plugin_name}]
-                projects[name]["plugins"] = plugins
-                self._save_projects(projects)
-            was_running = self._pm.status(name) == "running"
-            if was_running:
-                self._pm.stop(name)
-                self._pm.start(name)
-            note = " Project restarted." if was_running else " Restart project to apply."
-            await query.edit_message_text(
-                f"Plugins for '{name}':\n✓ = active, + = available\n\n{note}",
-                reply_markup=self._plugins_markup(name),
-            )
-
+            await self._cb_proj_ptog(query, data[len("proj_ptog_"):])
         elif data.startswith("proj_remove_"):
-            name = data[len("proj_remove_"):]
-            projects = self._load_projects()
-            if name in projects:
-                self._pm.stop(name)
-                del projects[name]
-                self._save_projects(projects)
-            markup = self._list_markup()
-            await query.edit_message_text(
-                self._projects_text() if markup else "No projects configured.", reply_markup=markup
-            )
+            await self._cb_proj_remove(query, data[len("proj_remove_"):])
 
     @staticmethod
     async def _post_init(app) -> None:

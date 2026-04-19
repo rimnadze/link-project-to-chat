@@ -37,8 +37,10 @@ class PluginContext:
     bot_token: str | None = None
     trusted_user_id: int | None = None
     allowed_user_ids: list[int] = field(default_factory=list)
+    executor_user_ids: list[int] = field(default_factory=list)
 
     bot_username: str = ""                           # e.g. "my_bot" — set after bot.get_me()
+    data_dir: Path | None = None                     # ~/.link-project-to-chat/meta/<bot_name>/
 
     web_port: int | None = None                      # local port of the embedded web server
     public_url: str | None = None                    # public HTTPS URL; set by in-app-web-server
@@ -69,6 +71,14 @@ class Plugin:
         self._ctx = context
         self._config = config
 
+    @property
+    def data_dir(self) -> Path:
+        """Per-plugin persistent storage: <meta_dir>/<bot_name>/plugins/<plugin_name>/"""
+        base = self._ctx.data_dir or (Path.home() / ".link-project-to-chat" / "meta" / self._ctx.bot_name)
+        path = base / "plugins" / self.name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -76,6 +86,12 @@ class Plugin:
 
     async def stop(self) -> None:
         """Called when the bot stops. Clean up resources here."""
+
+    # ── message hook ─────────────────────────────────────────────────────────
+
+    async def on_message(self, user_id: int, username: str, chat_id: int, message_id: int, text: str = "") -> bool:
+        """Called for every authorized incoming text message. Return True to consume (skip Claude)."""
+        return False
 
     # ── task hooks ───────────────────────────────────────────────────────────
 

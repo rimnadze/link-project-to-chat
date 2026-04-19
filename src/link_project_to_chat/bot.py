@@ -21,9 +21,11 @@ from telegram.ext import (
 from .config import (
     Config,
     DEFAULT_CONFIG,
+    DEFAULT_META_DIR,
     clear_session,
     load_sessions,
     patch_project,
+    resolve_project_meta_dir,
     resolve_permissions,
     save_session,
 )
@@ -84,6 +86,7 @@ class ProjectBot(AuthMixin):
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         plugins: list[dict] | None = None,
+        meta_dir: Path | None = None,
     ):
         self.name = name
         self.path = path.resolve()
@@ -102,6 +105,7 @@ class ProjectBot(AuthMixin):
         self._plugins: list[Plugin] = []
         self._plugin_callbacks: dict[str, Callable] = {}
         self._plugin_configs: list[dict] = plugins or []
+        self._meta_dir: Path = meta_dir or DEFAULT_META_DIR
         self._shared_ctx: PluginContext | None = None
         self._last_reload: float = 0.0
         self._init_auth()
@@ -133,9 +137,8 @@ class ProjectBot(AuthMixin):
         except Exception:
             logger.warning("failed to persist user_id for %s", user.username, exc_info=True)
         if self._shared_ctx is not None:
-            self._shared_ctx.allowed_user_ids = [
-                u["user_id"] for u in self._allowed_users if u.get("user_id")
-            ]
+            self._shared_ctx.allowed_user_ids = [u["user_id"] for u in self._allowed_users if u.get("user_id")]
+            self._shared_ctx.executor_user_ids = [u["user_id"] for u in self._allowed_users if u.get("user_id") and u.get("role") == "executor"]
         logger.info("Learned user_id %d for @%s", user.id, user.username)
 
     def _reload_if_needed(self) -> None:
@@ -154,9 +157,8 @@ class ProjectBot(AuthMixin):
                     for u in users
                 ]
                 if self._shared_ctx is not None:
-                    self._shared_ctx.allowed_user_ids = [
-                        u["user_id"] for u in self._allowed_users if u.get("user_id")
-                    ]
+                    self._shared_ctx.allowed_user_ids = [u["user_id"] for u in self._allowed_users if u.get("user_id")]
+                    self._shared_ctx.executor_user_ids = [u["user_id"] for u in self._allowed_users if u.get("user_id") and u.get("role") == "executor"]
         except Exception:
             logger.warning("hot-reload of allowed_users failed", exc_info=True)
 
@@ -305,6 +307,14 @@ class ProjectBot(AuthMixin):
         username = (user.username or str(user.id))
         self._record_message(chat_id, username, text, msg.message_id)
 
+        for plugin in self._plugins:
+            try:
+                consumed = await plugin.on_message(user.id, username, chat_id, msg.message_id, text)
+                if consumed:
+                    return
+            except Exception:
+                logger.warning("plugin %s on_message failed", plugin.name, exc_info=True)
+
         chat_type = update.effective_chat.type
         if chat_type in ("group", "supergroup"):
             bot_mention = f"@{self._bot_username}"
@@ -400,14 +410,6 @@ class ProjectBot(AuthMixin):
     def _current_model(self) -> str:
         return self.task_manager.claude.model_display or self.task_manager.claude.model
 
-    async def _on_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._is_executor(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
-        await update.effective_message.reply_text(
-            f"Current: {self._current_model()}",
-            reply_markup=self._model_markup(),
-        )
-
     def _effort_markup(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton(e, callback_data=f"effort_set_{e}")]
@@ -417,18 +419,7 @@ class ProjectBot(AuthMixin):
     def _current_effort(self) -> str:
         return self.task_manager.claude.effort
 
-    async def _on_effort(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._is_executor(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
-        await update.effective_message.reply_text(
-            f"Current: {self._current_effort()}",
-            reply_markup=self._effort_markup(),
-        )
-
-    _PERMISSION_OPTIONS = (
-        *PERMISSION_MODES,
-        "dangerously-skip-permissions",
-    )
+    _PERMISSION_OPTIONS = (*PERMISSION_MODES, "dangerously-skip-permissions")
 
     def _permissions_markup(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
@@ -442,13 +433,20 @@ class ProjectBot(AuthMixin):
             return "dangerously-skip-permissions"
         return claude.permission_mode or "default"
 
-    async def _on_permissions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _send_setting(self, update: Update, get_current, get_markup) -> None:
         if not self._is_executor(update.effective_user):
-            return await update.effective_message.reply_text("Unauthorized." if not self._auth(update.effective_user) else "View-only access.")
-        await update.effective_message.reply_text(
-            f"Current: {self._current_permission()}",
-            reply_markup=self._permissions_markup(),
-        )
+            msg = "Unauthorized." if not self._auth(update.effective_user) else "View-only access."
+            return await update.effective_message.reply_text(msg)
+        await update.effective_message.reply_text(f"Current: {get_current()}", reply_markup=get_markup())
+
+    async def _on_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._send_setting(update, self._current_model, self._model_markup)
+
+    async def _on_effort(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._send_setting(update, self._current_effort, self._effort_markup)
+
+    async def _on_permissions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._send_setting(update, self._current_permission, self._permissions_markup)
 
     async def _on_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_executor(update.effective_user):
@@ -485,6 +483,87 @@ class ProjectBot(AuthMixin):
             reply_markup=keyboard,
         )
 
+    async def _cb_model_set(self, query) -> None:
+        name = query.data[len("model_set_"):]
+        if name in MODELS:
+            self.task_manager.claude.model = name
+            self.task_manager.claude.model_display = None
+            patch_project(self.name, {"model": name})
+        await query.edit_message_text(f"Model: {self._current_model()}", reply_markup=self._model_markup())
+
+    async def _cb_effort_set(self, query) -> None:
+        level = query.data[len("effort_set_"):]
+        if level in EFFORT_LEVELS:
+            self.task_manager.claude.effort = level
+            patch_project(self.name, {"effort": level})
+        await query.edit_message_text(f"Effort: {self._current_effort()}", reply_markup=self._effort_markup())
+
+    async def _cb_permissions_set(self, query) -> None:
+        mode = query.data[len("permissions_set_"):]
+        if mode == "dangerously-skip-permissions" or mode in PERMISSION_MODES:
+            skip, pm = resolve_permissions(mode)
+            self.task_manager.claude.skip_permissions = skip
+            self.task_manager.claude.permission_mode = pm
+            patch_project(self.name, {"permissions": mode if mode != "default" else None})
+        await query.edit_message_text(f"Permissions: {self._current_permission()}", reply_markup=self._permissions_markup())
+
+    async def _cb_reset_confirm(self, query) -> None:
+        self.task_manager.cancel_all()
+        self.task_manager.claude.session_id = None
+        clear_session(self.name)
+        await query.edit_message_text("Session reset.")
+
+    async def _cb_task_info(self, query) -> None:
+        task_id = _parse_task_id(query.data)
+        task = self.task_manager.get(task_id)
+        if not task:
+            await query.edit_message_text(f"Task #{task_id} not found.")
+            return
+        elapsed = f" | {task.elapsed_human}" if task.elapsed_human else ""
+        text = f"#{task.id} [{task.type.value}] {task.status.value}{elapsed}\n{task.input[:200]}"
+        rows = []
+        if task.status in (TaskStatus.WAITING, TaskStatus.RUNNING) and self._is_executor(query.from_user):
+            rows.append([InlineKeyboardButton("Cancel", callback_data=f"task_cancel_{task_id}")])
+        if task.status in (TaskStatus.RUNNING, TaskStatus.DONE, TaskStatus.FAILED):
+            rows.append([InlineKeyboardButton("Log", callback_data=f"task_log_{task_id}")])
+        if task_id in self._thinking_store:
+            rows.append([InlineKeyboardButton("Thinking", callback_data=f"show_thinking_{task_id}")])
+        rows.append([InlineKeyboardButton("« Back", callback_data="tasks_back")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _cb_task_cancel(self, query) -> None:
+        if not self._is_executor(query.from_user):
+            await query.answer("View-only access.")
+            return
+        task_id = _parse_task_id(query.data)
+        if self.task_manager.cancel(task_id):
+            typing = self._typing_tasks.pop(task_id, None)
+            if typing:
+                typing.cancel()
+            await query.edit_message_text(f"#{task_id} cancelled.")
+        else:
+            await query.edit_message_text(f"#{task_id} not found or already finished.")
+
+    async def _cb_task_log(self, query) -> None:
+        task_id = _parse_task_id(query.data)
+        task = self.task_manager.get(task_id)
+        if not task:
+            await query.edit_message_text(f"Task #{task_id} not found.")
+            return
+        output = task.result or task.error or "(no output)"
+        if len(output) > 3000:
+            output = output[:3000] + f"\n... (truncated, {len(task.result or '')} chars total)"
+        rows = [[InlineKeyboardButton("« Back", callback_data=f"task_info_{task_id}")]]
+        await query.edit_message_text(f"#{task_id} log:\n{output}", reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _cb_show_thinking(self, query) -> None:
+        task_id = int(query.data[len("show_thinking_"):])
+        thinking = self._thinking_store.get(task_id)
+        if not thinking:
+            await query.answer("Thinking not available.")
+            return
+        await self._send_to_chat(query.message.chat_id, f"💭 {thinking}")
+
     async def _on_callback(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -501,96 +580,27 @@ class ProjectBot(AuthMixin):
                 await handler(query)
                 return
 
-        if query.data.startswith("model_set_"):
-            name = query.data[len("model_set_"):]
-            if name in MODELS:
-                self.task_manager.claude.model = name
-                self.task_manager.claude.model_display = None
-                patch_project(self.name, {"model": name})
-            await query.edit_message_text(
-                f"Model: {self._current_model()}",
-                reply_markup=self._model_markup(),
-            )
-        elif query.data.startswith("effort_set_"):
-            level = query.data[len("effort_set_"):]
-            if level in EFFORT_LEVELS:
-                self.task_manager.claude.effort = level
-                patch_project(self.name, {"effort": level})
-            await query.edit_message_text(
-                f"Effort: {self._current_effort()}",
-                reply_markup=self._effort_markup(),
-            )
-        elif query.data.startswith("permissions_set_"):
-            mode = query.data[len("permissions_set_"):]
-            if mode == "dangerously-skip-permissions" or mode in PERMISSION_MODES:
-                skip, pm = resolve_permissions(mode)
-                self.task_manager.claude.skip_permissions = skip
-                self.task_manager.claude.permission_mode = pm
-                patch_project(self.name, {"permissions": mode if mode != "default" else None})
-            await query.edit_message_text(
-                f"Permissions: {self._current_permission()}",
-                reply_markup=self._permissions_markup(),
-            )
-        elif query.data == "reset_confirm":
-            self.task_manager.cancel_all()
-            self.task_manager.claude.session_id = None
-            clear_session(self.name)
-            await query.edit_message_text("Session reset.")
-        elif query.data == "reset_cancel":
+        data = query.data
+        if data.startswith("model_set_"):
+            await self._cb_model_set(query)
+        elif data.startswith("effort_set_"):
+            await self._cb_effort_set(query)
+        elif data.startswith("permissions_set_"):
+            await self._cb_permissions_set(query)
+        elif data == "reset_confirm":
+            await self._cb_reset_confirm(query)
+        elif data == "reset_cancel":
             await query.edit_message_text("Reset cancelled.")
-        elif query.data.startswith("task_info_"):
-            task_id = _parse_task_id(query.data)
-            task = self.task_manager.get(task_id)
-            if not task:
-                await query.edit_message_text(f"Task #{task_id} not found.")
-                return
-            elapsed = f" | {task.elapsed_human}" if task.elapsed_human else ""
-            text = f"#{task.id} [{task.type.value}] {task.status.value}{elapsed}\n{task.input[:200]}"
-            rows = []
-            if task.status in (TaskStatus.WAITING, TaskStatus.RUNNING) and self._is_executor(query.from_user):
-                rows.append([InlineKeyboardButton("Cancel", callback_data=f"task_cancel_{task_id}")])
-            if task.status in (TaskStatus.RUNNING, TaskStatus.DONE, TaskStatus.FAILED):
-                rows.append([InlineKeyboardButton("Log", callback_data=f"task_log_{task_id}")])
-            if task_id in self._thinking_store:
-                rows.append([InlineKeyboardButton("Thinking", callback_data=f"show_thinking_{task_id}")])
-            rows.append([InlineKeyboardButton("« Back", callback_data="tasks_back")])
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
-        elif query.data == "tasks_back":
+        elif data.startswith("task_info_"):
+            await self._cb_task_info(query)
+        elif data == "tasks_back":
             await self._render_tasks(query.message.chat_id, edit_query=query)
-        elif query.data.startswith("task_cancel_"):
-            if not self._is_executor(query.from_user):
-                await query.answer("View-only access.")
-                return
-            task_id = _parse_task_id(query.data)
-            if self.task_manager.cancel(task_id):
-                typing = self._typing_tasks.pop(task_id, None)
-                if typing:
-                    typing.cancel()
-                await query.edit_message_text(f"#{task_id} cancelled.")
-            else:
-                await query.edit_message_text(f"#{task_id} not found or already finished.")
-        elif query.data.startswith("task_log_"):
-            task_id = _parse_task_id(query.data)
-            task = self.task_manager.get(task_id)
-            if not task:
-                await query.edit_message_text(f"Task #{task_id} not found.")
-                return
-            output = task.result or task.error or "(no output)"
-            if len(output) > 3000:
-                output = output[:3000] + f"\n... (truncated, {len(task.result or '')} chars total)"
-            rows = [[InlineKeyboardButton("« Back", callback_data=f"task_info_{task_id}")]]
-            await query.edit_message_text(f"#{task_id} log:\n{output}", reply_markup=InlineKeyboardMarkup(rows))
-        elif query.data.startswith("show_thinking_"):
-            try:
-                task_id = int(query.data[len("show_thinking_"):])
-            except ValueError:
-                await query.answer("Invalid thinking reference.")
-                return
-            thinking = self._thinking_store.get(task_id)
-            if not thinking:
-                await query.answer("Thinking not available.")
-                return
-            await self._send_to_chat(query.message.chat_id, f"💭 {thinking}")
+        elif data.startswith("task_cancel_"):
+            await self._cb_task_cancel(query)
+        elif data.startswith("task_log_"):
+            await self._cb_task_log(query)
+        elif data.startswith("show_thinking_"):
+            await self._cb_show_thinking(query)
 
     async def _on_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update.effective_user):
@@ -779,6 +789,8 @@ class ProjectBot(AuthMixin):
             bot_username=self._bot_username,
             trusted_user_id=next((u.get("user_id") for u in self._allowed_users if u.get("user_id")), None),
             allowed_user_ids=[u["user_id"] for u in self._allowed_users if u.get("user_id")],
+            executor_user_ids=[u["user_id"] for u in self._allowed_users if u.get("user_id") and u.get("role") == "executor"],
+            data_dir=resolve_project_meta_dir(self._meta_dir, self.name),
             _send=app.bot.send_message,
         )
         self._shared_ctx = shared_ctx
@@ -888,6 +900,7 @@ def run_bot(
     allowed_tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
     plugins: list[dict] | None = None,
+    meta_dir: Path | None = None,
 ) -> None:
     if not allowed_users:
         raise SystemExit(
@@ -902,6 +915,7 @@ def run_bot(
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         plugins=plugins,
+        meta_dir=meta_dir,
     )
     bot.task_manager.claude.session_id = session_id or load_sessions().get(name)
     if model:
@@ -941,6 +955,7 @@ def run_bots(
             allowed_tools=allowed_tools,
             disallowed_tools=disallowed_tools,
             plugins=proj.plugins or None,
+            meta_dir=config.meta_dir,
         )
     else:
         names = ", ".join(config.projects.keys())

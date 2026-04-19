@@ -16,6 +16,17 @@ from .stream import Error, Result, StreamEvent, TextDelta, ThinkingDelta
 logger = logging.getLogger(__name__)
 
 
+def fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
 class TaskType(enum.Enum):
     CLAUDE = "claude"
     COMMAND = "command"
@@ -63,16 +74,7 @@ class Task:
     @property
     def elapsed_human(self) -> str | None:
         s = self.elapsed
-        if s is None:
-            return None
-        s = int(s)
-        if s < 60:
-            return f"{s}s"
-        m, s = divmod(s, 60)
-        if m < 60:
-            return f"{m}m {s}s" if s else f"{m}m"
-        h, m = divmod(m, 60)
-        return f"{h}h {m}m" if m else f"{h}h"
+        return fmt_duration(s) if s is not None else None
 
     def cancel(self) -> bool:
         if self.status == TaskStatus.WAITING:

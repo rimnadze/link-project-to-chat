@@ -25,32 +25,28 @@ class AuthMixin:
     def _on_user_identified(self, user) -> None:
         """Called when user_id is learned for the first time. Override to persist."""
 
+    def _find_role(self, username: str, user) -> tuple[bool, str | None]:
+        """Search current allowed_users. Returns (found, role). role=None means rejected."""
+        for u in self._allowed_users:
+            if u["username"] != username:
+                continue
+            stored_id = u.get("user_id")
+            if stored_id and stored_id != user.id:
+                return True, None
+            if not stored_id:
+                u["user_id"] = user.id
+                self._on_user_identified(user)
+            return True, u.get("role", "viewer")
+        return False, None
+
     def _get_role(self, user) -> str | None:
         """Returns the user's role ('viewer' or 'executor'), or None if unauthorized."""
         username = (user.username or "").lower().lstrip("@")
-        for u in self._allowed_users:
-            if u["username"] != username:
-                continue
-            stored_id = u.get("user_id")
-            if stored_id and stored_id != user.id:
-                return None  # username matches but user_id doesn't — reject
-            if not stored_id:
-                u["user_id"] = user.id
-                self._on_user_identified(user)
-            return u.get("role", "viewer")
-        # Not found — try reloading config once, then check again
-        self._reload_if_needed()
-        for u in self._allowed_users:
-            if u["username"] != username:
-                continue
-            stored_id = u.get("user_id")
-            if stored_id and stored_id != user.id:
-                return None
-            if not stored_id:
-                u["user_id"] = user.id
-                self._on_user_identified(user)
-            return u.get("role", "viewer")
-        return None
+        found, role = self._find_role(username, user)
+        if not found:
+            self._reload_if_needed()
+            _, role = self._find_role(username, user)
+        return role
 
     def _auth(self, user) -> bool:
         return self._get_role(user) is not None

@@ -292,6 +292,7 @@ def start(
             allowed_tools=allowed,
             disallowed_tools=disallowed,
             plugins=proj.plugins or None,
+            meta_dir=config.meta_dir,
         )
     else:
         run_bots(
