@@ -27,7 +27,6 @@ COMMANDS = [
     ("start_all", "Start all projects"),
     ("stop_all", "Stop all projects"),
     ("add_project", "Add a new project"),
-    ("edit_project", "Edit a project"),
     ("help", "Show commands"),
 ]
 
@@ -218,16 +217,6 @@ class ManagerBot(AuthMixin):
         self._save_projects(projects)
         await update.effective_message.reply_text(f"Added project '{name}'.")
         return ConversationHandler.END
-
-    async def _on_edit_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        if not ctx.args or len(ctx.args) < 3:
-            return await update.effective_message.reply_text(
-                f"Usage: /edit_project <name> <field> <value>\nFields: {', '.join(_EDITABLE_FIELDS)}"
-            )
-        name, field, value = ctx.args[0], ctx.args[1], " ".join(ctx.args[2:])
-        await self._apply_edit(update, name, field, value)
 
     async def _apply_edit(self, update: Update, name: str, field: str, value: str) -> None:
         """Apply a field edit and send a confirmation reply."""
@@ -521,7 +510,6 @@ class ManagerBot(AuthMixin):
             "start_all": self._on_start_all,
             "stop_all": self._on_stop_all,
             "help": self._on_help,
-            "edit_project": self._on_edit_project,
         }.items():
             app.add_handler(CommandHandler(name, handler))
 
