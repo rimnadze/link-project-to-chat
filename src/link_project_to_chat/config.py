@@ -370,6 +370,44 @@ class GoogleChatConfig:
 
 
 @dataclass
+class GoogleChatProjectOverride:
+    """Per-project override layered on top of the top-level GoogleChatConfig.
+
+    Every field mirrors GoogleChatConfig but is Optional, so a project only
+    needs to set the fields that differ from the operational-defaults block.
+    ``port`` is required because two Google Chat bots cannot share a port.
+    """
+    port: int
+    service_account_file: str | None = None
+    public_url: str | None = None
+    root_command_id: int | None = None
+    project_number: str | None = None
+    auth_audience_type: str | None = None
+    host: str | None = None
+    callback_token_ttl_seconds: int | None = None
+    pending_prompt_ttl_seconds: int | None = None
+    max_message_bytes: int | None = None
+    attachment_max_bytes: int | None = None
+    endpoint_path: str | None = None
+    allowed_audiences: list[str] | None = None
+    app_id: str | None = None
+    root_command_name: str | None = None
+
+    def validate(self) -> None:
+        if not 1 <= self.port <= 65535:
+            raise ConfigError(
+                f"google_chat.port must be in 1..65535 (got {self.port})"
+            )
+        if self.auth_audience_type is not None and self.auth_audience_type not in {
+            "endpoint_url",
+            "project_number",
+        }:
+            raise ConfigError(
+                "google_chat.auth_audience_type must be 'endpoint_url' or 'project_number'"
+            )
+
+
+@dataclass
 class ProjectConfig:
     path: str
     telegram_bot_token: str

@@ -947,3 +947,41 @@ def test_team_config_load_save_preserves_safety_fields(tmp_path):
     raw = json.loads(cfg_path.read_text())
     assert raw["teams"]["lpct"]["max_autonomous_turns"] == 3
     assert raw["teams"]["lpct"]["safety_mode"] == "strict"
+
+
+def test_google_chat_project_override_defaults_all_optional_except_port():
+    from link_project_to_chat.config import GoogleChatProjectOverride
+
+    override = GoogleChatProjectOverride(port=8091)
+
+    # port is required; everything else defaults to None / unset
+    assert override.port == 8091
+    assert override.service_account_file is None
+    assert override.public_url is None
+    assert override.root_command_id is None
+    assert override.project_number is None
+    assert override.auth_audience_type is None
+    assert override.host is None
+    assert override.callback_token_ttl_seconds is None
+    assert override.pending_prompt_ttl_seconds is None
+    assert override.max_message_bytes is None
+    assert override.attachment_max_bytes is None
+    assert override.endpoint_path is None
+    assert override.allowed_audiences is None
+    assert override.app_id is None
+    assert override.root_command_name is None
+
+
+def test_google_chat_project_override_port_must_be_in_range():
+    from link_project_to_chat.config import ConfigError, GoogleChatProjectOverride
+
+    with pytest.raises(ConfigError):
+        GoogleChatProjectOverride(port=0).validate()
+    with pytest.raises(ConfigError):
+        GoogleChatProjectOverride(port=70_000).validate()
+
+
+def test_google_chat_project_override_validate_accepts_valid_port():
+    from link_project_to_chat.config import GoogleChatProjectOverride
+
+    GoogleChatProjectOverride(port=8091).validate()  # no exception
