@@ -21,6 +21,22 @@ def create_google_chat_app(transport, request_verifier: Callable | None = None) 
     async def google_chat_events(request: Request):
         verifier = request_verifier or transport.verify_request
         headers = dict(request.headers)
+        # TEMPORARY diagnostic: log every inbound POST so we can confirm Google
+        # is delivering events for all users (not just the app installer). Strip
+        # Authorization to avoid leaking JWTs; keep proxy + Google-injected
+        # headers that pinpoint the sender. Remove once routing is verified.
+        logger.info(
+            "inbound POST %s safe_headers=%s",
+            request.url.path,
+            {k: v for k, v in headers.items() if k.lower() in {
+                "user-agent",
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-real-ip",
+                "x-goog-authenticated-user-email",
+                "x-goog-authenticated-user-id",
+            }},
+        )
         try:
             async with asyncio.timeout(FAST_ACK_BUDGET_SECONDS):
                 try:
