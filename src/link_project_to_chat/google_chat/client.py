@@ -1,7 +1,57 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class GoogleChatAPIError(Exception):
+    """The Google Chat REST API returned a non-2xx response."""
+
+    def __init__(self, status_code: int, body: str, endpoint: str):
+        self.status_code = status_code
+        self.body = body
+        self.endpoint = endpoint
+        super().__init__(
+            f"Google Chat API {endpoint} returned {status_code}: {body[:500]}"
+        )
+
+
+def _safe_json(response, *, endpoint: str) -> dict:
+    """Decode a Google Chat REST response, surfacing the actual status + body
+    on any non-2xx response so callers see the real server message instead of
+    a JSONDecodeError stack.
+
+    Backward-compatible with test fakes that don't set `status_code`: if the
+    attribute is missing, the response is assumed to be a 2xx and `.json()`
+    is called directly.
+    """
+    status = getattr(response, "status_code", None)
+    if status is not None and not (200 <= status < 300):
+        body = ""
+        try:
+            body = response.text
+        except Exception:  # noqa: BLE001
+            try:
+                body = response.content.decode("utf-8", errors="replace")
+            except Exception:
+                body = "<unreadable response body>"
+        logger.warning(
+            "Google Chat API non-2xx response: status=%s endpoint=%s body=%s",
+            status, endpoint, body[:500],
+        )
+        raise GoogleChatAPIError(status, body, endpoint)
+    try:
+        return response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        body = getattr(response, "text", "") or ""
+        logger.warning(
+            "Google Chat API non-JSON response: status=%s endpoint=%s body=%s",
+            status, endpoint, body[:500],
+        )
+        raise GoogleChatAPIError(status if status is not None else -1, body, endpoint) from exc
 
 
 class GoogleChatClient:
@@ -25,8 +75,9 @@ class GoogleChatClient:
         if thread_name:
             body = dict(body)
             body["thread"] = {"name": thread_name}
-        response = await self._http.post(f"/v1/{space}/messages", json=body, params=params)
-        return response.json()
+        endpoint = f"/v1/{space}/messages"
+        response = await self._http.post(endpoint, json=body, params=params)
+        return _safe_json(response, endpoint=endpoint)
 
     async def update_message(
         self,
@@ -37,8 +88,9 @@ class GoogleChatClient:
         allow_missing: bool = False,
     ) -> dict:
         params = {"updateMask": update_mask, "allowMissing": allow_missing}
-        response = await self._http.patch(f"/v1/{message_name}", json=body, params=params)
-        return response.json()
+        endpoint = f"/v1/{message_name}"
+        response = await self._http.patch(endpoint, json=body, params=params)
+        return _safe_json(response, endpoint=endpoint)
 
     async def upload_attachment(
         self,

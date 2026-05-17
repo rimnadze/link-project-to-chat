@@ -175,10 +175,26 @@ class GoogleChatTransport:
     def verify_request(self, headers) -> "VerifiedGoogleChatRequest":
         from .auth import verify_google_chat_request  # noqa: PLC0415
 
+        # Workspace add-on Chat apps sign tokens with the project-scoped
+        # gsuiteaddons service account, not the standard `chat@system...`
+        # signer. When `project_number` is configured, widen both the
+        # endpoint_url signer set and the project_number issuer set so the
+        # add-on flow verifies correctly without breaking the standalone path.
+        signers = {"chat@system.gserviceaccount.com"}
+        issuers = {"chat@system.gserviceaccount.com"}
+        if self.config.project_number:
+            addon_signer = (
+                f"service-{self.config.project_number}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
+            )
+            signers.add(addon_signer)
+            issuers.add(addon_signer)
+
         return verify_google_chat_request(
             headers=headers,
             mode=self.config.auth_audience_type,
             audiences=self._effective_allowed_audiences(),
+            accepted_signer_emails=frozenset(signers),
+            accepted_issuers=frozenset(issuers),
         )
 
     def _effective_allowed_audiences(self) -> list[str]:
@@ -424,6 +440,13 @@ class GoogleChatTransport:
     # ── Event dispatch ────────────────────────────────────────────────────
 
     async def dispatch_event(self, payload: dict) -> None:
+        # Workspace add-on Chat apps send a nested envelope with
+        # `commonEventObject` / `authorizationEventObject` / `chat`, where the
+        # actual event is at `chat.{messagePayload,appCommandPayload,...}`.
+        # Standalone Chat apps send a flat `{type, space, user, message, ...}`.
+        # Detect and rewrite to the flat shape so the rest of the dispatcher
+        # (and downstream handlers / fixtures) keep working.
+        payload = self._maybe_unwrap_addon_envelope(payload)
         event_type = payload.get("type")
         if event_type in {"MESSAGE", "APP_COMMAND", "CARD_CLICKED"}:
             key = self._event_idempotency_key(payload)
@@ -437,7 +460,48 @@ class GoogleChatTransport:
         elif event_type == "CARD_CLICKED":
             await self._dispatch_card_clicked(payload)
         else:
-            logger.debug("GoogleChatTransport: ignoring unknown event type %r", event_type)
+            logger.debug("GoogleChatTransport: ignoring unknown event type=%r", event_type)
+
+    def _maybe_unwrap_addon_envelope(self, payload: dict) -> dict:
+        """Rewrite a Workspace-add-on envelope to the standalone Chat-app shape."""
+        if "commonEventObject" not in payload:
+            return payload
+        chat = payload.get("chat") or {}
+        if not isinstance(chat, dict):
+            return payload
+        common_user = chat.get("user") or {}
+        common_time = chat.get("eventTime")
+        if "messagePayload" in chat:
+            mp = chat.get("messagePayload") or {}
+            return {
+                "type": "MESSAGE",
+                "eventTime": mp.get("eventTime") or common_time,
+                "space": mp.get("space", {}),
+                "user": mp.get("user") or common_user,
+                "message": mp.get("message", {}),
+            }
+        if "appCommandPayload" in chat:
+            ap = chat.get("appCommandPayload") or {}
+            return {
+                "type": "APP_COMMAND",
+                "eventTime": ap.get("eventTime") or common_time,
+                "space": ap.get("space", {}),
+                "user": ap.get("user") or common_user,
+                "message": ap.get("message", {}),
+                "appCommandMetadata": ap.get("appCommandMetadata", {}),
+            }
+        if "buttonClickedPayload" in chat:
+            bp = chat.get("buttonClickedPayload") or {}
+            return {
+                "type": "CARD_CLICKED",
+                "eventTime": bp.get("eventTime") or common_time,
+                "space": bp.get("space", {}),
+                "user": bp.get("user") or common_user,
+                "message": bp.get("message", {}),
+                "action": bp.get("action", {}),
+                "common": bp.get("common", {}),
+            }
+        return payload
 
     async def _consume_events(self) -> None:
         while True:
@@ -491,6 +555,7 @@ class GoogleChatTransport:
             if inspect.isawaitable(allowed):
                 allowed = await allowed
             if not allowed:
+                logger.debug("GoogleChatTransport: authorizer rejected sender=%r", sender)
                 return
         message_data = payload["message"]
         text = message_data.get("text", "")
