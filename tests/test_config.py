@@ -1133,3 +1133,26 @@ def test_project_config_load_rejects_invalid_google_chat_block(tmp_path):
 
     with pytest.raises(ConfigError, match="port"):
         load_config(cfg_path)
+
+
+def test_project_config_warns_on_non_dict_google_chat(tmp_path, caplog):
+    import json
+    import logging
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "alpha": {
+                "path": "/p",
+                "telegram_bot_token": "",
+                "google_chat": "not-a-dict",
+            }
+        }
+    }))
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_config(cfg_path)
+
+    assert loaded.projects["alpha"].google_chat is None
+    assert any("google_chat" in rec.getMessage().lower() for rec in caplog.records)

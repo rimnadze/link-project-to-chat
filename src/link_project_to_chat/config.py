@@ -1190,6 +1190,12 @@ def _load_config_unlocked(
                 )
                 safety_prompt = None
             raw_gchat = proj.get("google_chat")
+            if raw_gchat is not None and not isinstance(raw_gchat, dict):
+                logger.warning(
+                    "project %r: google_chat must be a dict or absent; got %r (treating as default)",
+                    name, raw_gchat,
+                )
+                raw_gchat = None
             google_chat = _parse_google_chat_override(raw_gchat) if isinstance(raw_gchat, dict) else None
             config.projects[name] = ProjectConfig(
                 path=proj["path"],
