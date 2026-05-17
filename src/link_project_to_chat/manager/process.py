@@ -450,6 +450,12 @@ class ProcessManager:
         from disk — keeps the spawn deterministic even if the operator edits
         config.json between manager start-up and bot start.
         """
+        if project_name in self.google_chat_pids:
+            logger.warning(
+                "google_chat subprocess already running for project %r (pid=%d)",
+                project_name, self.google_chat_pids[project_name],
+            )
+            return False
         config = load_config(self._project_config_path) if self._project_config_path else load_config()
         resolved = resolve_project_google_chat(project_name, config)
         if resolved is None:

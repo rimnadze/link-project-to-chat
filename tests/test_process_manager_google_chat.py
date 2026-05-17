@@ -79,3 +79,33 @@ def test_start_google_chat_subprocess_returns_false_when_unconfigured(tmp_path):
     pm = ProcessManager(project_config_path=cfg_path)
     assert pm.start_google_chat_subprocess("beta") is False
     assert "beta" not in pm.google_chat_pids
+
+
+def test_start_google_chat_subprocess_is_idempotent_returns_false_on_second_call(
+    monkeypatch, tmp_path
+):
+    """Calling start twice without an intervening stop must NOT leak the first PID."""
+    pids_seen: list[int] = []
+
+    def fake_popen(cmd, **kwargs):
+        pid = 12345 + len(pids_seen)
+        pids_seen.append(pid)
+        class FakeProc:
+            def poll(self): return None
+        proc = FakeProc()
+        proc.pid = pid
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+
+    assert pm.start_google_chat_subprocess("alpha") is True
+    first_pid = pm.google_chat_pids["alpha"]
+
+    # Second call without stop: must return False, must NOT replace the PID.
+    assert pm.start_google_chat_subprocess("alpha") is False
+    assert pm.google_chat_pids["alpha"] == first_pid
+
+    # And no second Popen was issued.
+    assert len(pids_seen) == 1
