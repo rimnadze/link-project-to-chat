@@ -143,22 +143,12 @@ class AuthMixin:
         # The reload is a no-op on subclasses that don't set the state
         # (guarded by hasattr inside _reload_allowed_users_if_stale).
         self._reload_allowed_users_if_stale()
-        # TEMPORARY diagnostic: surface the allow-list and counter state so we
-        # can see why an entry that LOOKS like it should match in config.json
-        # ends up rejected. Reverts together with the Google-Chat probes.
-        key = self._identity_key(identity)
-        logger.info(
-            "auth: identity_key=%s failed=%d allowed_users=%s",
-            key,
-            self._failed_auth_counts.get(key, 0),
-            [(u.username, u.role, u.locked_identities) for u in self._allowed_users],
-        )
         if not self._allowed_users:
             return False
+        key = self._identity_key(identity)
         if self._failed_auth_counts.get(key, 0) >= self._MAX_FAILED_AUTH:
             return False
         role = self._get_user_role(identity)
-        logger.info("auth: _get_user_role returned %r for %s", role, key)
         if role is None:
             self._failed_auth_counts[key] = self._failed_auth_counts.get(key, 0) + 1
             return False
