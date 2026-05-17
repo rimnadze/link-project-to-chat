@@ -985,3 +985,10 @@ def test_google_chat_project_override_validate_accepts_valid_port():
     from link_project_to_chat.config import GoogleChatProjectOverride
 
     GoogleChatProjectOverride(port=8091).validate()  # no exception
+
+
+def test_google_chat_project_override_validate_rejects_invalid_audience_type():
+    from link_project_to_chat.config import ConfigError, GoogleChatProjectOverride
+
+    with pytest.raises(ConfigError, match="auth_audience_type"):
+        GoogleChatProjectOverride(port=8091, auth_audience_type="invalid").validate()
