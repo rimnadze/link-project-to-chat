@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import json
 import logging
 import os
 import signal
@@ -13,7 +14,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .config import load_project_configs, set_project_autostart, set_team_bot_autostart
-from ..config import DEFAULT_CONFIG, load_config, resolve_start_model
+from ..config import (
+    DEFAULT_CONFIG,
+    _serialize_google_chat,
+    load_config,
+    resolve_start_model,
+)
+from ..google_chat.resolver import resolve_project_google_chat
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +201,13 @@ class ProcessManager:
         # SQLite file is opened at most once per manager lifetime.
         self._cached_session_string: str | None = None
         self._session_string_cached: bool = False
+        # PID tracking for Google Chat bot subprocesses (one per project that
+        # has a google_chat block configured). Keyed by project name; mirrors
+        # the telegram-bot tracking in ``self._processes`` but lives in a
+        # separate dict because google_chat bots are not modelled as
+        # ProcessManager-spawned Popen handles yet — Task 7 only wires the
+        # spawn path.
+        self.google_chat_pids: dict[str, int] = {}
 
     def _base_cli_command(self) -> list[str]:
         cmd = [sys.executable, "-m", "link_project_to_chat.cli"]
@@ -421,6 +435,37 @@ class ProcessManager:
         self._write_pidfile(key, proc.pid)
         logger.info("Started team %s/%s (pid=%d)", team_name, role, proc.pid)
         self._set_team_bot_autostart(team_name, role, True)
+        return True
+
+    def start_google_chat_subprocess(self, project_name: str) -> bool:
+        """Spawn a Google Chat bot subprocess for ``project_name``.
+
+        Returns False if the project has no google_chat configured (no
+        per-project override and no meaningful top-level block). Returns True
+        after ``Popen`` — does not wait for the child to fully bind the port;
+        binding failures surface via the standard non-zero-exit path.
+
+        The merged config is passed to the child as a JSON blob on
+        ``--google-chat-config-json`` so the child does not need to re-merge
+        from disk — keeps the spawn deterministic even if the operator edits
+        config.json between manager start-up and bot start.
+        """
+        config = load_config(self._project_config_path) if self._project_config_path else load_config()
+        resolved = resolve_project_google_chat(project_name, config)
+        if resolved is None:
+            return False
+
+        blob = json.dumps(_serialize_google_chat(resolved))
+        cmd = self._base_cli_command()
+        cmd.extend([
+            "start",
+            "--project", project_name,
+            "--transport", "google_chat",
+            "--google-chat-config-json", blob,
+        ])
+        proc = subprocess.Popen(cmd, **_process_popen_kwargs())
+        self.google_chat_pids[project_name] = proc.pid
+        logger.info("Started google_chat bot %s (pid=%d)", project_name, proc.pid)
         return True
 
     def stop(self, project_name: str) -> bool:
