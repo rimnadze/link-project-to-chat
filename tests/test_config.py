@@ -1156,3 +1156,77 @@ def test_project_config_warns_on_non_dict_google_chat(tmp_path, caplog):
 
     assert loaded.projects["alpha"].google_chat is None
     assert any("google_chat" in rec.getMessage().lower() for rec in caplog.records)
+
+
+def test_migration_auto_claims_for_single_project(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config, save_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "solo": {"path": "/p", "telegram_bot_token": ""},
+        },
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["solo"].google_chat is not None
+    assert loaded.projects["solo"].google_chat.port == 8090
+
+    save_config(loaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert "google_chat" in raw["projects"]["solo"]
+
+
+def test_migration_idempotent(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config, save_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {"solo": {"path": "/p", "telegram_bot_token": ""}},
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    load_config(cfg_path)
+    save_config(load_config(cfg_path), cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    # Per-project override exists; running again must not duplicate, change, or remove it.
+    assert raw["projects"]["solo"]["google_chat"]["port"] == 8090
+
+
+def test_migration_skips_when_multiple_projects_no_overrides(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "a": {"path": "/a", "telegram_bot_token": ""},
+            "b": {"path": "/b", "telegram_bot_token": ""},
+        },
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    loaded = load_config(cfg_path)
+    # Ambiguous which project to claim — migration MUST NOT guess.
+    assert loaded.projects["a"].google_chat is None
+    assert loaded.projects["b"].google_chat is None
+    # The top-level block is preserved, the operator will use the wizard to claim.
+    assert loaded.google_chat.port == 8090

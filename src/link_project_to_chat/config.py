@@ -1052,6 +1052,25 @@ def _google_chat_is_default(cfg: GoogleChatConfig) -> bool:
     return cfg == GoogleChatConfig()
 
 
+def _maybe_migrate_top_level_google_chat(cfg: "Config") -> None:
+    """One-shot: when exactly one project exists and has no override but
+    the top-level google_chat block is meaningful, synthesize an override.
+    No-op when zero, multiple, or already-overridden projects exist.
+    """
+    if cfg.google_chat is None:
+        return
+    top = cfg.google_chat
+    if not (top.service_account_file or top.public_url or top.root_command_id):
+        return  # not a meaningful top-level block
+    projects_without_override = [
+        name for name, pc in cfg.projects.items() if pc.google_chat is None
+    ]
+    if len(cfg.projects) != 1 or len(projects_without_override) != 1:
+        return  # ambiguous; skip silently
+    sole_name = projects_without_override[0]
+    cfg.projects[sole_name].google_chat = GoogleChatProjectOverride(port=top.port)
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> Config:
     """Public API: acquires _config_lock for the read.
 
@@ -1265,6 +1284,7 @@ def _load_config_unlocked(
                         handle=bot_cfg.bot_username,
                     )
             config.teams[name] = team_cfg
+    _maybe_migrate_top_level_google_chat(config)
     return config
 
 
