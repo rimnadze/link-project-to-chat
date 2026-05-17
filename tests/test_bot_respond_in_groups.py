@@ -409,3 +409,53 @@ async def test_group_voice_with_caption_mention_routes_to_voice_dispatch():
     await bot._on_text_from_transport(incoming)
     assert bot._on_voice_from_transport.await_count == 1
     bot._on_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_group_mention_by_native_id_when_bot_username_is_empty():
+    """Transports without @handles (Google Chat) leave bot_username empty
+    because self_identity.handle is None. Routing must still recognise that
+    we were @-mentioned by matching `IncomingMessage.mentions[*]` against
+    the transport's self_identity by (transport_id, native_id).
+    """
+    bot = _make_bot(respond_in_groups=True, bot_username="")
+    # Stand in for a Google-Chat-style transport with a learned identity.
+    bot._transport.self_identity = Identity(
+        transport_id="fake",
+        native_id="users/bot-app-1",
+        display_name="LPTC",
+        handle=None,
+        is_bot=True,
+    )
+    bot_mention = Identity(
+        transport_id="fake",
+        native_id="users/bot-app-1",
+        display_name="LPTC",
+        handle=None,
+        is_bot=True,
+    )
+    incoming = _make_group_incoming("@LPTC ping", mentions=[bot_mention])
+
+    await bot._on_text_from_transport(incoming)
+
+    assert bot._on_text.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_group_message_without_id_match_silent_when_bot_username_is_empty():
+    """Negative: the id-match fallback only fires when mentions actually
+    contain the bot. A drive-by message with no relevant mentions stays silent.
+    """
+    bot = _make_bot(respond_in_groups=True, bot_username="")
+    bot._transport.self_identity = Identity(
+        transport_id="fake",
+        native_id="users/bot-app-1",
+        display_name="LPTC",
+        handle=None,
+        is_bot=True,
+    )
+    incoming = _make_group_incoming("just chatter")
+
+    await bot._on_text_from_transport(incoming)
+
+    bot._on_text.assert_not_awaited()

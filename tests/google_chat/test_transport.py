@@ -946,3 +946,170 @@ def test_unwrap_addon_envelope_passes_through_when_chat_block_has_no_payload():
     envelope = _addon_envelope({"eventTime": "2026-05-17T20:04:00Z", "user": {"name": "users/111"}})
 
     assert transport._maybe_unwrap_addon_envelope(envelope) is envelope
+
+
+def _message_event_with_annotations(annotations: list[dict], *, text: str = "@LPTC ping") -> dict:
+    return {
+        "type": "MESSAGE",
+        "eventTime": "2026-05-17T22:00:00Z",
+        "space": {"name": "spaces/AAA", "spaceType": "SPACE"},
+        "message": {
+            "name": "spaces/AAA/messages/m-1",
+            "text": text,
+            "annotations": annotations,
+        },
+        "user": {"name": "users/111", "displayName": "R", "email": "r@example.test"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_event_populates_mentions_from_user_mention_annotations():
+    """Per spec 2026-04-25-transport-google-chat-design.md §4.9: populate
+    `IncomingMessage.mentions` from `message.annotations[].userMention.user`
+    so group-routing can identify @-mention targets without parsing text."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    seen: list = []
+    transport.on_message(lambda msg: seen.append(msg))
+    payload = _message_event_with_annotations([
+        {
+            "type": "USER_MENTION",
+            "startIndex": 0,
+            "length": 5,
+            "userMention": {
+                "user": {
+                    "name": "users/bot-app-1",
+                    "displayName": "LPTC",
+                    "type": "BOT",
+                },
+                "type": "MENTION",
+            },
+        },
+    ])
+
+    await transport.dispatch_event(payload)
+
+    assert len(seen) == 1
+    mentions = seen[0].mentions
+    assert len(mentions) == 1
+    assert mentions[0].transport_id == "google_chat"
+    assert mentions[0].native_id == "users/bot-app-1"
+    assert mentions[0].display_name == "LPTC"
+    assert mentions[0].is_bot is True
+
+
+@pytest.mark.asyncio
+async def test_message_event_ignores_non_user_mention_annotations():
+    """SLASH_COMMAND, RICH_LINK, etc. annotations should not produce mentions."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    seen: list = []
+    transport.on_message(lambda msg: seen.append(msg))
+    payload = _message_event_with_annotations([
+        {"type": "SLASH_COMMAND", "slashCommand": {"commandId": "1"}},
+        {"type": "RICH_LINK", "richLinkMetadata": {"uri": "https://x.test"}},
+    ])
+
+    await transport.dispatch_event(payload)
+
+    assert seen[0].mentions == []
+
+
+@pytest.mark.asyncio
+async def test_message_event_learns_self_identity_from_bot_mention():
+    """The default `self_identity` is a sentinel (`google_chat:app`, handle=None).
+    Google only delivers MESSAGE events to apps targeted by the user, so when
+    the payload carries exactly one BOT-type USER_MENTION the transport adopts
+    that identity. This is how the bot learns its own `users/<id>` and display
+    name — there's no equivalent of Telegram's `get_me()`."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    transport.on_message(lambda msg: None)
+    payload = _message_event_with_annotations([
+        {
+            "type": "USER_MENTION",
+            "userMention": {
+                "user": {
+                    "name": "users/bot-app-1",
+                    "displayName": "LPTC",
+                    "type": "BOT",
+                },
+                "type": "MENTION",
+            },
+        },
+    ])
+
+    await transport.dispatch_event(payload)
+
+    assert transport.self_identity.native_id == "users/bot-app-1"
+    assert transport.self_identity.display_name == "LPTC"
+    assert transport.self_identity.is_bot is True
+
+
+@pytest.mark.asyncio
+async def test_self_identity_not_overwritten_after_initial_learn():
+    """Once self_identity has been learned, subsequent events must not mutate it
+    — even if a different BOT appears in annotations (e.g., user later mentions
+    a peer bot in the same space)."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    transport.on_message(lambda msg: None)
+    first = _message_event_with_annotations([
+        {
+            "type": "USER_MENTION",
+            "userMention": {
+                "user": {"name": "users/bot-app-1", "displayName": "LPTC", "type": "BOT"},
+                "type": "MENTION",
+            },
+        },
+    ])
+    second = _message_event_with_annotations([
+        {
+            "type": "USER_MENTION",
+            "userMention": {
+                "user": {"name": "users/bot-app-2", "displayName": "OtherBot", "type": "BOT"},
+                "type": "MENTION",
+            },
+        },
+    ])
+    second["message"]["name"] = "spaces/AAA/messages/m-2"  # avoid idempotency dedup
+
+    await transport.dispatch_event(first)
+    await transport.dispatch_event(second)
+
+    assert transport.self_identity.native_id == "users/bot-app-1"
+
+
+@pytest.mark.asyncio
+async def test_self_identity_not_learned_when_multiple_bots_mentioned():
+    """Ambiguous: if the user @-mentions two bots in one message we receive
+    annotations for both. We can't tell which is us, so we must skip learning
+    until a single-bot mention arrives or the operator configures identity."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    transport.on_message(lambda msg: None)
+    payload = _message_event_with_annotations([
+        {
+            "type": "USER_MENTION",
+            "userMention": {
+                "user": {"name": "users/bot-app-1", "displayName": "LPTC", "type": "BOT"},
+                "type": "MENTION",
+            },
+        },
+        {
+            "type": "USER_MENTION",
+            "userMention": {
+                "user": {"name": "users/bot-app-2", "displayName": "OtherBot", "type": "BOT"},
+                "type": "MENTION",
+            },
+        },
+    ])
+
+    await transport.dispatch_event(payload)
+
+    assert transport.self_identity.native_id == "google_chat:app"  # unchanged

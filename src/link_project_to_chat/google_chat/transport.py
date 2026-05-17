@@ -71,6 +71,33 @@ def _identity_from_user(user: dict) -> Identity:
     )
 
 
+def _mentions_from_annotations(annotations: list) -> list[Identity]:
+    """Extract `Identity` entries from Google Chat `message.annotations`.
+
+    Per spec §4.9, USER_MENTION annotations are the authoritative source for
+    @-mention targets — text parsing is fallback-only. Non-USER_MENTION
+    annotations (SLASH_COMMAND, RICH_LINK, etc.) and malformed entries are
+    silently skipped.
+    """
+    result: list[Identity] = []
+    for annotation in annotations or []:
+        if not isinstance(annotation, dict) or annotation.get("type") != "USER_MENTION":
+            continue
+        user_mention = annotation.get("userMention") or {}
+        user = user_mention.get("user") or {}
+        name = user.get("name")
+        if not name:
+            continue
+        result.append(Identity(
+            transport_id="google_chat",
+            native_id=name,
+            display_name=user.get("displayName") or name,
+            handle=user.get("email"),
+            is_bot=user.get("type") == "BOT",
+        ))
+    return result
+
+
 def _safe_attachment_name(content_name: object, *, fallback: str = "attachment") -> str:
     raw_name = str(content_name or fallback).replace("\\", "/")
     leaf = raw_name.rsplit("/", 1)[-1].strip()
@@ -547,6 +574,24 @@ class GoogleChatTransport:
             self._seen_event_cache.popitem(last=False)
         return False
 
+    def _maybe_learn_self_identity(self, mentions: list[Identity]) -> None:
+        """Adopt the bot's real identity from a USER_MENTION when unambiguous.
+
+        The default ``self_identity`` is a placeholder sentinel
+        (``google_chat:app``, ``handle=None``) because Google Chat has no
+        get_me() equivalent. Google delivers MESSAGE events only to apps
+        targeted by the user, so when a payload contains exactly one BOT-type
+        USER_MENTION that bot must be us — record its ``users/<id>`` and
+        display name so room routing can match by ID. Multi-bot annotations
+        are ambiguous and skipped; once learned, the identity is sticky.
+        """
+        if self.self_identity.native_id != "google_chat:app":
+            return
+        bot_mentions = [m for m in mentions if m.is_bot]
+        if len(bot_mentions) != 1:
+            return
+        self.self_identity = bot_mentions[0]
+
     async def _dispatch_message(self, payload: dict) -> None:
         chat = _chat_from_space(payload["space"])
         sender = _identity_from_user(payload["user"])
@@ -566,6 +611,8 @@ class GoogleChatTransport:
             chat,
             native={"thread_name": thread_name} if thread_name else {},
         )
+        mentions = _mentions_from_annotations(message_data.get("annotations", []))
+        self._maybe_learn_self_identity(mentions)
         tempdir: tempfile.TemporaryDirectory | None = None
         try:
             files: list[IncomingFile] = []
@@ -609,6 +656,7 @@ class GoogleChatTransport:
                 reply_to=None,
                 message=message,
                 has_unsupported_media=has_unsupported_media,
+                mentions=mentions,
             )
             for handler in self._message_handlers:
                 result = handler(msg)
