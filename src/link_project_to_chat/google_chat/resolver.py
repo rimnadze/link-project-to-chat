@@ -7,6 +7,7 @@ from link_project_to_chat.config import (
     Config,
     GoogleChatConfig,
     GoogleChatProjectOverride,
+    _google_chat_top_is_meaningful,
 )
 
 
@@ -33,10 +34,7 @@ def resolve_project_google_chat(project_name: str, config: Config) -> GoogleChat
     # A "non-empty" top-level is one with at least service_account_file,
     # public_url, or root_command_id explicitly set. port is excluded — it
     # defaults to 8090 (truthy), so it can't distinguish "set" from "unset".
-    top_is_meaningful = (
-        top_level is not None
-        and (top_level.service_account_file or top_level.public_url or top_level.root_command_id)
-    )
+    top_is_meaningful = top_level is not None and _google_chat_top_is_meaningful(top_level)
     if override is None and not top_is_meaningful:
         return None
 

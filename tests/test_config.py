@@ -1199,11 +1199,27 @@ def test_migration_idempotent(tmp_path):
         },
     }))
 
-    load_config(cfg_path)
-    save_config(load_config(cfg_path), cfg_path)
+    # First load → migration auto-claims the single project with port=8090.
+    loaded = load_config(cfg_path)
+    assert loaded.projects["solo"].google_chat is not None
+    assert loaded.projects["solo"].google_chat.port == 8090
+
+    # Operator subsequently bumps the override's port via the wizard (Task 12).
+    # Save with the bumped port to simulate that.
+    loaded.projects["solo"].google_chat.port = 9100
+    save_config(loaded, cfg_path)
+
+    # Re-load: migration MUST NOT fire again. The bumped port must survive.
+    reloaded = load_config(cfg_path)
+    assert reloaded.projects["solo"].google_chat is not None
+    assert reloaded.projects["solo"].google_chat.port == 9100, (
+        "migration re-fired and overwrote the operator's port choice"
+    )
+
+    # And the raw JSON must reflect the bumped port, not the original 8090.
+    save_config(reloaded, cfg_path)
     raw = json.loads(cfg_path.read_text())
-    # Per-project override exists; running again must not duplicate, change, or remove it.
-    assert raw["projects"]["solo"]["google_chat"]["port"] == 8090
+    assert raw["projects"]["solo"]["google_chat"]["port"] == 9100
 
 
 def test_migration_skips_when_multiple_projects_no_overrides(tmp_path):

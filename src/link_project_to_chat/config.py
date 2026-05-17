@@ -1052,6 +1052,16 @@ def _google_chat_is_default(cfg: GoogleChatConfig) -> bool:
     return cfg == GoogleChatConfig()
 
 
+def _google_chat_top_is_meaningful(top: "GoogleChatConfig") -> bool:
+    """True when the top-level google_chat block has at least one identity
+    signal explicitly set. Used by the migration and resolver to distinguish
+    "operator-configured" from "pure-default" top-level blocks. port is
+    excluded - it has a non-zero default (8090) and can't distinguish set
+    from unset.
+    """
+    return bool(top.service_account_file or top.public_url or top.root_command_id)
+
+
 def _maybe_migrate_top_level_google_chat(cfg: "Config") -> None:
     """One-shot: when exactly one project exists and has no override but
     the top-level google_chat block is meaningful, synthesize an override.
@@ -1060,7 +1070,7 @@ def _maybe_migrate_top_level_google_chat(cfg: "Config") -> None:
     if cfg.google_chat is None:
         return
     top = cfg.google_chat
-    if not (top.service_account_file or top.public_url or top.root_command_id):
+    if not _google_chat_top_is_meaningful(top):
         return  # not a meaningful top-level block
     projects_without_override = [
         name for name, pc in cfg.projects.items() if pc.google_chat is None
