@@ -1604,3 +1604,54 @@ def test_projects_edit_safety_prompt_to_default_strips_key(tmp_path):
     import json
     raw = json.loads(cfg_file.read_text())
     assert "safety_prompt" not in raw["projects"]["p"]
+
+
+def test_start_accepts_google_chat_config_json(monkeypatch, tmp_path):
+    """When --google-chat-config-json is set, the start command must use the
+    resolved blob instead of reading config.google_chat from disk."""
+    import json
+    from click.testing import CliRunner
+    from link_project_to_chat.cli import main
+
+    captured = {}
+
+    def fake_run_bot(*args, **kwargs):
+        # run_bot's positional signature is (name, path, token, ...).
+        captured["transport_kind"] = kwargs.get("transport_kind")
+        captured["google_chat"] = kwargs["config"].google_chat
+        return  # don't actually start the bot
+
+    monkeypatch.setattr("link_project_to_chat.bot.run_bot", fake_run_bot)
+
+    proj_dir = tmp_path / "alpha"
+    proj_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "allowed_users": [{"username": "alice", "role": "executor"}],
+        "projects": {"alpha": {"path": str(proj_dir), "telegram_bot_token": "tok"}},
+    }))
+
+    blob = json.dumps({
+        "service_account_file": "/keys/alpha.json",
+        "port": 8091,
+        "public_url": "https://alpha.example",
+        "root_command_id": 7,
+    })
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "--config", str(cfg_path),
+        "start",
+        "--project", "alpha",
+        "--transport", "google_chat",
+        "--google-chat-config-json", blob,
+    ])
+    assert result.exit_code == 0, result.output
+
+    # The resolved config blob got applied on top of (or in place of)
+    # whatever was in config.json's google_chat block.
+    assert captured["transport_kind"] == "google_chat"
+    assert captured["google_chat"].service_account_file == "/keys/alpha.json"
+    assert captured["google_chat"].port == 8091
+    assert captured["google_chat"].public_url == "https://alpha.example"
+    assert captured["google_chat"].root_command_id == 7
