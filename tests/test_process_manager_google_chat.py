@@ -109,3 +109,63 @@ def test_start_google_chat_subprocess_is_idempotent_returns_false_on_second_call
 
     # And no second Popen was issued.
     assert len(pids_seen) == 1
+
+
+def test_stop_google_chat_subprocess_kills_and_clears_pid(monkeypatch, tmp_path):
+    sent_signals: list[int] = []
+
+    class FakeProc:
+        pid = 12345
+
+        def terminate(self):
+            sent_signals.append(15)  # SIGTERM
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: FakeProc())
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+    pm.start_google_chat_subprocess("alpha")
+
+    assert pm.stop_google_chat_subprocess("alpha") is True
+    assert sent_signals == [15]
+    assert "alpha" not in pm.google_chat_pids
+
+
+def test_stop_google_chat_subprocess_returns_false_when_not_running(tmp_path):
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+    assert pm.stop_google_chat_subprocess("alpha") is False
+
+
+def test_restart_google_chat_subprocess_calls_stop_then_start(monkeypatch, tmp_path):
+    events: list[str] = []
+
+    class FakeProc:
+        pid = 12345
+
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return None
+
+    def fake_popen(*a, **kw):
+        events.append("popen")
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+    pm.start_google_chat_subprocess("alpha")
+    events.clear()
+
+    assert pm.restart_google_chat_subprocess("alpha") is True
+    assert events == ["terminate", "popen"]

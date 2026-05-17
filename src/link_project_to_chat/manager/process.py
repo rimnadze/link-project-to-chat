@@ -204,10 +204,15 @@ class ProcessManager:
         # PID tracking for Google Chat bot subprocesses (one per project that
         # has a google_chat block configured). Keyed by project name; mirrors
         # the telegram-bot tracking in ``self._processes`` but lives in a
-        # separate dict because google_chat bots are not modelled as
-        # ProcessManager-spawned Popen handles yet — Task 7 only wires the
-        # spawn path.
+        # separate dict because google_chat bots have their own lifecycle
+        # (per-project HTTP listener, dedicated start/stop/restart surface).
+        # ``google_chat_pids`` is the public observable surface (used by tests
+        # and the manager UI to identify which projects are running) while
+        # ``_google_chat_procs`` holds the live ``Popen`` handle used by
+        # ``stop_google_chat_subprocess`` to ``.terminate()`` and by Task 10
+        # (crash detection) to ``.poll()``.
         self.google_chat_pids: dict[str, int] = {}
+        self._google_chat_procs: dict[str, subprocess.Popen] = {}
 
     def _base_cli_command(self) -> list[str]:
         cmd = [sys.executable, "-m", "link_project_to_chat.cli"]
@@ -471,8 +476,43 @@ class ProcessManager:
         ])
         proc = subprocess.Popen(cmd, **_process_popen_kwargs())
         self.google_chat_pids[project_name] = proc.pid
+        self._google_chat_procs[project_name] = proc
         logger.info("Started google_chat bot %s (pid=%d)", project_name, proc.pid)
         return True
+
+    def stop_google_chat_subprocess(self, project_name: str) -> bool:
+        """SIGTERM the project's google_chat subprocess.
+
+        Returns True if a subprocess was tracked (and signalled), False if
+        nothing was running. Clears both ``google_chat_pids`` and
+        ``_google_chat_procs`` regardless of whether the underlying process
+        was still alive — the bookkeeping is the source of truth for
+        "is this project running" and must be left consistent.
+        """
+        proc = self._google_chat_procs.pop(project_name, None)
+        self.google_chat_pids.pop(project_name, None)
+        if proc is None:
+            return False
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            # Already gone — bookkeeping is now consistent, treat as success.
+            return True
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        logger.info("Stopped google_chat bot %s", project_name)
+        return True
+
+    def restart_google_chat_subprocess(self, project_name: str) -> bool:
+        """Stop then start. Returns the ``start_google_chat_subprocess`` result.
+
+        A failed stop is non-fatal (means nothing was running); the start
+        result is what callers care about.
+        """
+        self.stop_google_chat_subprocess(project_name)
+        return self.start_google_chat_subprocess(project_name)
 
     def stop(self, project_name: str) -> bool:
         """Stop a running project / team-bot subprocess.
