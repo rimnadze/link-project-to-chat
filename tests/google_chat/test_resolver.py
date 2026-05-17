@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from link_project_to_chat.config import (
     Config,
     GoogleChatConfig,
@@ -69,7 +67,7 @@ def test_override_replaces_per_field():
     assert resolved.host == "0.0.0.0"
 
 
-def test_override_alone_is_incomplete_returns_none():
+def test_override_alone_returns_merged_with_empty_defaults():
     """Override with only port set, no top-level block to fill service_account_file."""
     config = _config(None, {
         "alpha": ProjectConfig(
