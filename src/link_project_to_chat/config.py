@@ -444,6 +444,7 @@ class ProjectConfig:
     # via _resolve_safety_prompt(). Each backend renders the field in its
     # native style (Claude: --append-system-prompt parts list;
     # Codex: <system-reminder> block).
+    google_chat: "GoogleChatProjectOverride | None" = None
 
 
 @dataclass
@@ -1188,6 +1189,8 @@ def _load_config_unlocked(
                     name, raw_sp,
                 )
                 safety_prompt = None
+            raw_gchat = proj.get("google_chat")
+            google_chat = _parse_google_chat_override(raw_gchat) if isinstance(raw_gchat, dict) else None
             config.projects[name] = ProjectConfig(
                 path=proj["path"],
                 telegram_bot_token=proj.get("telegram_bot_token", ""),
@@ -1206,6 +1209,7 @@ def _load_config_unlocked(
                 plugins=_parse_plugins(proj.get("plugins", [])),
                 respond_in_groups=respond_in_groups,
                 safety_prompt=safety_prompt,
+                google_chat=google_chat,
             )
             if not effective and not config.allowed_users:
                 # Only warn when BOTH scopes are empty - global fallback would
@@ -1440,6 +1444,10 @@ def _save_config_unlocked(config: Config, path: Path) -> None:
         else:
             # Empty string is a meaningful "explicit disable"; write it through.
             proj["safety_prompt"] = p.safety_prompt
+        if p.google_chat is not None:
+            proj["google_chat"] = _serialize_google_chat_override(p.google_chat)
+        else:
+            proj.pop("google_chat", None)
         # Strip any legacy keys lingering on the raw entry.
         proj.pop("allowed_usernames", None)
         proj.pop("username", None)

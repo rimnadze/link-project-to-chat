@@ -1070,3 +1070,66 @@ def test_parse_google_chat_override_rejects_invalid_audience_type():
 
     with pytest.raises(ConfigError, match="auth_audience_type"):
         _parse_google_chat_override({"port": 8091, "auth_audience_type": "bogus"})
+
+
+def test_project_config_google_chat_defaults_none():
+    from link_project_to_chat.config import ProjectConfig
+
+    pc = ProjectConfig(path="/p", telegram_bot_token="")
+    assert pc.google_chat is None
+
+
+def test_project_config_round_trips_google_chat_override(tmp_path):
+    import json
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        load_config,
+        save_config,
+    )
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "alpha": {
+                "path": "/p",
+                "telegram_bot_token": "",
+                "google_chat": {
+                    "port": 8091,
+                    "service_account_file": "/keys/a.json",
+                    "public_url": "https://a.example",
+                    "root_command_id": 5,
+                },
+            }
+        }
+    }))
+
+    loaded = load_config(cfg_path)
+    alpha = loaded.projects["alpha"]
+    assert alpha.google_chat == GoogleChatProjectOverride(
+        port=8091,
+        service_account_file="/keys/a.json",
+        public_url="https://a.example",
+        root_command_id=5,
+    )
+
+    save_config(loaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert raw["projects"]["alpha"]["google_chat"] == {
+        "port": 8091,
+        "service_account_file": "/keys/a.json",
+        "public_url": "https://a.example",
+        "root_command_id": 5,
+    }
+
+
+def test_project_config_load_rejects_invalid_google_chat_block(tmp_path):
+    import json
+    from link_project_to_chat.config import ConfigError, load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {"alpha": {"path": "/p", "telegram_bot_token": "", "google_chat": {}}}
+    }))
+
+    with pytest.raises(ConfigError, match="port"):
+        load_config(cfg_path)
