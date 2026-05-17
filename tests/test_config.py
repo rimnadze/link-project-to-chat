@@ -1056,3 +1056,17 @@ def test_google_chat_override_round_trip():
     raw = _serialize_google_chat_override(original)
     reparsed = _parse_google_chat_override(raw)
     assert reparsed == original
+
+
+def test_parse_google_chat_override_rejects_non_list_allowed_audiences():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="allowed_audiences"):
+        _parse_google_chat_override({"port": 8091, "allowed_audiences": "not-a-list"})
+
+
+def test_parse_google_chat_override_rejects_invalid_audience_type():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="auth_audience_type"):
+        _parse_google_chat_override({"port": 8091, "auth_audience_type": "bogus"})
