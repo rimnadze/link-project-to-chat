@@ -155,3 +155,87 @@ async def test_upload_attachment_rejects_oversize_files(fake_httpx, tmp_path: Pa
         await client.upload_attachment("spaces/AAA", src, mime_type="text/plain", max_bytes=5)
 
     assert fake_httpx.calls == []
+
+
+# GoogleChatAPIError surfacing -----------------------------------------------
+
+
+class _ErrorResponse:
+    """Mimics the parts of httpx.Response we care about for error paths."""
+
+    def __init__(self, status_code: int, text: str = "", invalid_json: bool = False):
+        self.status_code = status_code
+        self.text = text
+        self._invalid_json = invalid_json
+
+    def json(self) -> dict:
+        if self._invalid_json:
+            import json as _json
+            raise _json.JSONDecodeError("Expecting value", self.text, 0)
+        return {}
+
+
+class _ErrorHttpx:
+    def __init__(self, response):
+        self._response = response
+
+    async def post(self, *args, **kwargs):
+        return self._response
+
+    async def patch(self, *args, **kwargs):
+        return self._response
+
+
+@pytest.mark.asyncio
+async def test_create_message_raises_google_chat_api_error_on_404(caplog):
+    """404 from Google (e.g. an invalid space) must raise GoogleChatAPIError
+    with the status, endpoint, and body — not a JSONDecodeError stack."""
+    from link_project_to_chat.google_chat.client import GoogleChatAPIError
+
+    response = _ErrorResponse(status_code=404, text="<h1>Not Found</h1>")
+    client = GoogleChatClient(http=_ErrorHttpx(response))
+
+    with caplog.at_level("WARNING", logger="link_project_to_chat.google_chat.client"):
+        with pytest.raises(GoogleChatAPIError) as exc_info:
+            await client.create_message("users/not-a-space", {"text": "hi"})
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.endpoint == "/v1/users/not-a-space/messages"
+    assert "<h1>Not Found</h1>" in exc_info.value.body
+    assert any("non-2xx response" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_create_message_raises_google_chat_api_error_on_non_json_2xx(caplog):
+    """A 200 with a non-JSON body still surfaces the body instead of
+    a confusing JSONDecodeError."""
+    from link_project_to_chat.google_chat.client import GoogleChatAPIError
+
+    response = _ErrorResponse(status_code=200, text="<html>broken</html>", invalid_json=True)
+    client = GoogleChatClient(http=_ErrorHttpx(response))
+
+    with caplog.at_level("WARNING", logger="link_project_to_chat.google_chat.client"):
+        with pytest.raises(GoogleChatAPIError) as exc_info:
+            await client.create_message("spaces/AAA", {"text": "hi"})
+
+    assert exc_info.value.status_code == 200
+    assert "<html>broken</html>" in exc_info.value.body
+    assert any("non-JSON response" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_update_message_raises_google_chat_api_error_on_403(caplog):
+    """update_message goes through the same _safe_json wrapper."""
+    from link_project_to_chat.google_chat.client import GoogleChatAPIError
+
+    response = _ErrorResponse(status_code=403, text='{"error": "forbidden"}')
+    client = GoogleChatClient(http=_ErrorHttpx(response))
+
+    with caplog.at_level("WARNING", logger="link_project_to_chat.google_chat.client"):
+        with pytest.raises(GoogleChatAPIError) as exc_info:
+            await client.update_message(
+                "spaces/AAA/messages/1", {"text": "edit"}, update_mask="text",
+            )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.endpoint == "/v1/spaces/AAA/messages/1"
