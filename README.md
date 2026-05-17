@@ -87,6 +87,17 @@ extra, configure a Google Chat app with an HTTP endpoint, and set the required
   `allowed_audiences` can be derived from `public_url + endpoint_path` when
   omitted; for `project_number` mode, set `project_number`.
 
+If the Cloud Console UI registers your Chat app as a **Workspace add-on**
+(the default path now — once saved this setting is silently irreversible),
+Google signs incoming OIDC tokens with the project-scoped
+`service-<project_number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`
+identity rather than the standard `chat@system.gserviceaccount.com`. The
+transport detects this automatically when `project_number` is set in the
+`google_chat` config — set it to the numeric project ID (visible at the top
+of the Cloud Console Configuration tab as **Project number (App ID)**) and
+the verifier widens its accepted signer set accordingly. Standalone Chat
+apps continue to work without `project_number` set.
+
 Then start with:
 
 ```bash

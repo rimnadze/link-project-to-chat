@@ -3245,6 +3245,12 @@ class ProjectBot(AuthMixin):
                 if not ident_key.startswith(active_prefix):
                     continue
                 native_id = ident_key[len(active_prefix):]
+                if self._transport.TRANSPORT_ID == "google_chat":
+                    # Google Chat user identities (`users/<id>`) are not valid
+                    # spaces — `POST /v1/users/.../messages` returns 404. The
+                    # bot is discovered via DM/space, so a startup ping isn't
+                    # useful here either way; skip cleanly.
+                    continue
                 if self._transport.TRANSPORT_ID == "telegram":
                     try:
                         int(native_id)

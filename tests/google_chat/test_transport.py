@@ -821,3 +821,128 @@ async def test_enqueue_drops_event_when_queue_full(caplog):
     assert transport.pending_event_count == 2  # queue stayed at maxsize, third event dropped
     assert transport._overflowed_events == 1
     assert any("pending-event queue full" in rec.message for rec in caplog.records)
+
+
+# Workspace-add-on envelope unwrap -------------------------------------------
+
+
+def _addon_envelope(chat_block: dict) -> dict:
+    """Build a minimal Workspace-add-on envelope around a `chat` block."""
+    return {
+        "commonEventObject": {"hostApp": "CHAT", "platform": "WEB"},
+        "authorizationEventObject": {"userOAuthToken": "redacted"},
+        "chat": chat_block,
+    }
+
+
+def test_unwrap_addon_envelope_message_payload():
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    envelope = _addon_envelope({
+        "eventTime": "2026-05-17T20:00:00Z",
+        "user": {"name": "users/111", "displayName": "Tester", "email": "t@x.test"},
+        "messagePayload": {
+            "space": {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"},
+            "message": {"name": "spaces/AAA/messages/1", "text": "hi"},
+        },
+    })
+
+    rewritten = transport._maybe_unwrap_addon_envelope(envelope)
+
+    assert rewritten["type"] == "MESSAGE"
+    assert rewritten["space"] == {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"}
+    assert rewritten["message"] == {"name": "spaces/AAA/messages/1", "text": "hi"}
+    assert rewritten["user"]["name"] == "users/111"
+    assert rewritten["eventTime"] == "2026-05-17T20:00:00Z"
+
+
+def test_unwrap_addon_envelope_app_command_payload():
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    envelope = _addon_envelope({
+        "eventTime": "2026-05-17T20:01:00Z",
+        "user": {"name": "users/111", "displayName": "Tester"},
+        "appCommandPayload": {
+            "space": {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"},
+            "message": {"name": "spaces/AAA/messages/2", "text": "/lp2c help"},
+            "appCommandMetadata": {"appCommandId": 1, "appCommandType": "SLASH_COMMAND"},
+        },
+    })
+
+    rewritten = transport._maybe_unwrap_addon_envelope(envelope)
+
+    assert rewritten["type"] == "APP_COMMAND"
+    assert rewritten["appCommandMetadata"]["appCommandId"] == 1
+    assert rewritten["space"]["name"] == "spaces/AAA"
+    assert rewritten["message"]["text"] == "/lp2c help"
+
+
+def test_unwrap_addon_envelope_button_clicked_payload():
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    envelope = _addon_envelope({
+        "eventTime": "2026-05-17T20:02:00Z",
+        "user": {"name": "users/111"},
+        "buttonClickedPayload": {
+            "space": {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"},
+            "message": {"name": "spaces/AAA/messages/3"},
+            "action": {"actionMethodName": "lp2c_button_click"},
+            "common": {"parameters": {"callback_token": "tok"}},
+        },
+    })
+
+    rewritten = transport._maybe_unwrap_addon_envelope(envelope)
+
+    assert rewritten["type"] == "CARD_CLICKED"
+    assert rewritten["action"]["actionMethodName"] == "lp2c_button_click"
+    assert rewritten["common"]["parameters"]["callback_token"] == "tok"
+
+
+def test_unwrap_addon_envelope_falls_back_to_chat_user_when_payload_missing_user():
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    envelope = _addon_envelope({
+        "eventTime": "2026-05-17T20:03:00Z",
+        "user": {"name": "users/222", "displayName": "FromChatBlock"},
+        "messagePayload": {
+            "space": {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"},
+            "message": {"name": "spaces/AAA/messages/4", "text": "hi"},
+            # NB: no `user` key inside messagePayload — must inherit from chat block.
+        },
+    })
+
+    rewritten = transport._maybe_unwrap_addon_envelope(envelope)
+
+    assert rewritten["user"]["name"] == "users/222"
+    assert rewritten["user"]["displayName"] == "FromChatBlock"
+
+
+def test_unwrap_addon_envelope_no_op_for_standalone_payload():
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    standalone = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA", "spaceType": "DIRECT_MESSAGE"},
+        "user": {"name": "users/111"},
+        "message": {"name": "spaces/AAA/messages/1", "text": "hi"},
+    }
+
+    # No commonEventObject → not an add-on envelope → return unchanged.
+    assert transport._maybe_unwrap_addon_envelope(standalone) is standalone
+
+
+def test_unwrap_addon_envelope_passes_through_when_chat_block_has_no_payload():
+    """Envelope with `commonEventObject` but a `chat` block we don't recognise
+    (e.g. add-on lifecycle events Chat doesn't expose to us) should fall through
+    so the outer dispatcher logs an unknown-type debug line rather than raise."""
+    transport = GoogleChatTransport(
+        config=GoogleChatConfig(allowed_audiences=["https://x.test/google-chat/events"]),
+    )
+    envelope = _addon_envelope({"eventTime": "2026-05-17T20:04:00Z", "user": {"name": "users/111"}})
+
+    assert transport._maybe_unwrap_addon_envelope(envelope) is envelope
