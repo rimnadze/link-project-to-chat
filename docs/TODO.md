@@ -47,7 +47,7 @@ Status tracker: [2026-04-25-spec0-followups.md](2026-04-25-spec0-followups.md)
 | #1 Web UI | [spec](superpowers/specs/2026-04-21-transport-web-ui-design.md) | [plan](superpowers/plans/2026-04-21-web-transport.md) · [review-fix plan](superpowers/plans/2026-04-25-transport-spec1-review-fixes.md) | ✅ | Shipped 2026-04-25 (commits `6c12b39`..`d24ef52`); review-fix landed same day (commits `77abcff`..`7b73b8d`) closing P1.1/P1.2/P1.3/P1.4/P2. First non-Telegram transport. FastAPI + HTMX + SSE + SQLite. Closed A1, partially closed A2 (schema only). |
 | #2 Discord | [spec](superpowers/specs/2026-04-21-transport-discord-design.md) | [plan](superpowers/plans/2026-04-21-discord-transport.md) | 📋 | Uses discord.py 2.x, depends on #1 primitives. |
 | #3 Slack | [spec](superpowers/specs/2026-04-21-transport-slack-design.md) | [plan](superpowers/plans/2026-04-21-slack-transport.md) | 📋 | slack_bolt + Socket Mode; final cross-platform validation. |
-| #4 Google Chat | [spec](superpowers/specs/2026-04-25-transport-google-chat-design.md) | [plan](superpowers/plans/2026-04-25-transport-google-chat.md) | ✅ | HTTP Chat app events + Google Chat REST API; lifecycle, command auth, cards in/out, prompt submit/update, attachment download, and both audience modes implemented. v1.1 caveats: outbound upload deferred pending user-OAuth support, per-process callback tokens, in-memory event dedupe, space-bound prompts by default, native inline `REQUEST_DIALOG` deferred, and no Pub/Sub delivery mode. |
+| #4 Google Chat | [spec](superpowers/specs/2026-04-25-transport-google-chat-design.md) | [plan](superpowers/plans/2026-04-25-transport-google-chat.md) | ✅ | HTTP Chat app events + Google Chat REST API; lifecycle, command auth, cards in/out, prompt submit/update, attachment download, and both audience modes implemented. v1.1 caveats: outbound upload deferred pending user-OAuth support, per-process callback tokens, in-memory event dedupe, space-bound prompts by default, native inline `REQUEST_DIALOG` deferred, and no Pub/Sub delivery mode. **v1.2+ follow-ups (manager integration, per-project `google_chat` override) tracked in §1.5.** |
 
 ### 1.4 Plugin system port + `AllowedUser` auth model rewrite (v1.0.0)
 
@@ -81,6 +81,36 @@ Verification: `pytest -q` → **1118 passed, 5 skipped** (baseline 1003 + 115 ne
 | 🟡 Minor | README plugin snippet imports unused `ChatRef`. | [README.md](../README.md) |
 | 🟡 Minor | `ProjectBot.__init__` comment slightly imprecise about which legacy kwargs remain. | [bot.py](../src/link_project_to_chat/bot.py) |
 | 🟡 Minor | `_persist_auth_if_dirty` swallows all exceptions; no N-failure alerting for repeated disk-write failures. | [bot.py](../src/link_project_to_chat/bot.py), [manager/bot.py](../src/link_project_to_chat/manager/bot.py) |
+
+### 1.5 Google Chat v1.2+ follow-ups (manager integration + multi-bot config)
+
+**Goal:** make adding a Google Chat bot for an lptc-project feel like adding a Telegram bot does today — `/add_project` (or the equivalent) in the manager, fill in the per-project Chat-app secrets, and the manager handles the supervised subprocess. Today every Google Chat bot stands alone: separate config block, separate port, separate systemd unit, separate nginx vhost. That's fine for 1-2 bots, untenable for the 6 projects already in `config.json`.
+
+**Why now-ish:** the user has multiple lptc projects and asked how to wire Google Chat for each. The current code path forces `--transport google_chat --google-chat-port N` per process and reads a **single** top-level `google_chat` config block, so all Google Chat bots would share one bot identity. Manager-supervised subprocesses + per-project config is the standard lptc shape; google_chat just hasn't caught up.
+
+**Scope (proposed tasks):**
+
+| # | Scope | Files | Status |
+|---|---|---|---|
+| 1 | **Per-project `google_chat` override on `ProjectConfig`.** `ProcessManager` picks per-project values when starting; top-level `google_chat` block becomes the default. Config schema + load/save + migration. | `config.py` (+ tests in `tests/google_chat/test_config.py`) | 📋 |
+| 2 | **`ProcessManager` spawns `google_chat` bots.** Loop alongside the Telegram spawn path; choose transport based on per-project config presence; pass `--transport google_chat --google-chat-port N`; track PID + restart on exit like Telegram bots. | `manager/process.py` (+ tests in `tests/test_process_manager*.py`) | 📋 |
+| 3 | **Port allocation + collision detection.** Manager either reads `port` from per-project config and refuses to start on conflict, or auto-allocates from a pool. Decision needed: explicit (config) vs auto (pool). Recommend explicit — matches the explicit nginx vhost the operator already maintains. | `manager/process.py`, `config.py` | 📋 |
+| 4 | **Manager UI: add/edit Google Chat bot for a project.** Wizard asks for service-account JSON path, port, public URL, root_command_id; persists to `projects.<name>.google_chat`. New buttons under per-project view: `[+ Add Google Chat]` / `[Edit Google Chat]` / `[Remove Google Chat]`. Executor-only, persists via `_persist_auth_if_dirty`-style helper. | `manager/bot.py`, `manager/conversation.py` (+ tests in `tests/test_manager*.py`) | 📋 |
+| 5 | **Docs + migration.** README setup section reflects per-project flow as the new default; CHANGELOG entry; migration note that today's single top-level `google_chat` block continues to work as the implicit default for any project that doesn't override it. | `README.md`, `docs/CHANGELOG.md`, `docs/TODO.md` | 📋 |
+
+**Operational items intentionally out of scope:**
+
+- **nginx vhost provisioning** — operator-supplied. Each new Google Chat bot still needs an HTTPS subdomain (or path) routed to the per-project port. We document the pattern; we don't automate certbot.
+- **Cloud Console Chat app creation** — manual. One GCP project per Chat app per Google's own constraint.
+- **Multiple Chat apps per GCP project** — Google limitation, no workaround inside lptc.
+
+**Acceptance:**
+
+- `link-project-to-chat configure` (or the manager wizard) can add a Google Chat bot to any project without editing `config.json` by hand.
+- A single systemd unit (`link-project-to-chat.service`, the manager) supervises both Telegram and Google Chat bots for every project that has one configured.
+- Existing single-bot deployments keep working with no config migration (top-level `google_chat` block remains valid and is inherited when no project override exists).
+
+**Estimated effort:** ~2-3 days, one feature branch, executable as a single subagent-driven-development plan. The hardest task is #4 (manager UI) because the wizard state machine grows; tasks 1-3 are mechanical.
 
 ---
 
