@@ -975,6 +975,78 @@ def _serialize_google_chat(cfg: GoogleChatConfig) -> dict:
     }
 
 
+def _parse_google_chat_override(raw: dict) -> "GoogleChatProjectOverride":
+    if "port" not in raw:
+        raise ConfigError("google_chat per-project override requires 'port'")
+    port_raw = raw["port"]
+    if not isinstance(port_raw, int):
+        raise ConfigError("google_chat.port must be an integer")
+
+    def _opt_str(key: str) -> str | None:
+        value = raw.get(key)
+        return str(value) if isinstance(value, str) else None
+
+    def _opt_int(key: str) -> int | None:
+        value = raw.get(key)
+        return int(value) if isinstance(value, int) else None
+
+    audience_type = _opt_str("auth_audience_type")
+    if audience_type is not None and audience_type not in {"endpoint_url", "project_number"}:
+        raise ConfigError(
+            "google_chat.auth_audience_type must be 'endpoint_url' or 'project_number'"
+        )
+
+    allowed = raw.get("allowed_audiences")
+    if allowed is not None and (
+        not isinstance(allowed, list) or not all(isinstance(v, str) for v in allowed)
+    ):
+        raise ConfigError("google_chat.allowed_audiences must be a list of strings")
+
+    override = GoogleChatProjectOverride(
+        port=port_raw,
+        service_account_file=_opt_str("service_account_file"),
+        public_url=_opt_str("public_url"),
+        root_command_id=_opt_int("root_command_id"),
+        project_number=_opt_str("project_number"),
+        auth_audience_type=audience_type,
+        host=_opt_str("host"),
+        callback_token_ttl_seconds=_opt_int("callback_token_ttl_seconds"),
+        pending_prompt_ttl_seconds=_opt_int("pending_prompt_ttl_seconds"),
+        max_message_bytes=_opt_int("max_message_bytes"),
+        attachment_max_bytes=_opt_int("attachment_max_bytes"),
+        endpoint_path=_opt_str("endpoint_path"),
+        allowed_audiences=allowed,
+        app_id=_opt_str("app_id"),
+        root_command_name=_opt_str("root_command_name"),
+    )
+    override.validate()
+    return override
+
+
+def _serialize_google_chat_override(override: "GoogleChatProjectOverride") -> dict:
+    raw: dict[str, object] = {"port": override.port}
+    for field_name in (
+        "service_account_file",
+        "public_url",
+        "root_command_id",
+        "project_number",
+        "auth_audience_type",
+        "host",
+        "callback_token_ttl_seconds",
+        "pending_prompt_ttl_seconds",
+        "max_message_bytes",
+        "attachment_max_bytes",
+        "endpoint_path",
+        "allowed_audiences",
+        "app_id",
+        "root_command_name",
+    ):
+        value = getattr(override, field_name)
+        if value is not None:
+            raw[field_name] = value
+    return raw
+
+
 def _google_chat_is_default(cfg: GoogleChatConfig) -> bool:
     return cfg == GoogleChatConfig()
 

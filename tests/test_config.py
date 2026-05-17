@@ -992,3 +992,67 @@ def test_google_chat_project_override_validate_rejects_invalid_audience_type():
 
     with pytest.raises(ConfigError, match="auth_audience_type"):
         GoogleChatProjectOverride(port=8091, auth_audience_type="invalid").validate()
+
+
+def test_parse_google_chat_override_minimal():
+    from link_project_to_chat.config import _parse_google_chat_override
+
+    override = _parse_google_chat_override({"port": 8091})
+    assert override.port == 8091
+    assert override.service_account_file is None
+
+
+def test_parse_google_chat_override_full():
+    from link_project_to_chat.config import _parse_google_chat_override
+
+    raw = {
+        "port": 8092,
+        "service_account_file": "/keys/proj.json",
+        "public_url": "https://proj.example.com",
+        "root_command_id": 7,
+        "project_number": "12345",
+    }
+    override = _parse_google_chat_override(raw)
+    assert override.port == 8092
+    assert override.service_account_file == "/keys/proj.json"
+    assert override.public_url == "https://proj.example.com"
+    assert override.root_command_id == 7
+    assert override.project_number == "12345"
+
+
+def test_parse_google_chat_override_missing_port_raises():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="port"):
+        _parse_google_chat_override({"public_url": "https://x.test"})
+
+
+def test_serialize_google_chat_override_omits_none_fields():
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        _serialize_google_chat_override,
+    )
+
+    raw = _serialize_google_chat_override(
+        GoogleChatProjectOverride(port=8091, public_url="https://x.test")
+    )
+    assert raw == {"port": 8091, "public_url": "https://x.test"}
+    assert "service_account_file" not in raw  # None fields stripped
+
+
+def test_google_chat_override_round_trip():
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        _parse_google_chat_override,
+        _serialize_google_chat_override,
+    )
+
+    original = GoogleChatProjectOverride(
+        port=8091,
+        service_account_file="/keys/a.json",
+        public_url="https://a.example",
+        root_command_id=3,
+    )
+    raw = _serialize_google_chat_override(original)
+    reparsed = _parse_google_chat_override(raw)
+    assert reparsed == original
