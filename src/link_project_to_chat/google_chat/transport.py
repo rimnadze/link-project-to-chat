@@ -595,12 +595,17 @@ class GoogleChatTransport:
     async def _dispatch_message(self, payload: dict) -> None:
         chat = _chat_from_space(payload["space"])
         sender = _identity_from_user(payload["user"])
+        # TEMPORARY diagnostic: surface sender so we can see who Google routes
+        # events for vs. who the bot accepts. Pair with the inbound-POST log
+        # in app.py. Reverts together once routing is settled.
+        logger.info("GoogleChatTransport: dispatch_message sender=%r chat=%r", sender, chat)
         if self._authorizer is not None:
             allowed = self._authorizer(sender)
             if inspect.isawaitable(allowed):
                 allowed = await allowed
             if not allowed:
-                logger.debug("GoogleChatTransport: authorizer rejected sender=%r", sender)
+                # TEMP: was DEBUG; promote so silent drops are visible.
+                logger.info("GoogleChatTransport: authorizer rejected sender=%r", sender)
                 return
         message_data = payload["message"]
         text = message_data.get("text", "")
