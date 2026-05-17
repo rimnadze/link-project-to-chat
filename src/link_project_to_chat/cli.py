@@ -552,9 +552,28 @@ def start(
         import json as _json
         from dataclasses import fields as _fields
         from .config import GoogleChatConfig
-        raw = _json.loads(google_chat_config_json)
+        try:
+            raw = _json.loads(google_chat_config_json)
+        except _json.JSONDecodeError as exc:
+            raise click.BadParameter(
+                f"--google-chat-config-json: invalid JSON ({exc})",
+                param_hint="--google-chat-config-json",
+            ) from exc
+        if not isinstance(raw, dict):
+            raise click.BadParameter(
+                "--google-chat-config-json must be a JSON object",
+                param_hint="--google-chat-config-json",
+            )
+        allowed = {f.name for f in _fields(GoogleChatConfig)}
+        unknown = set(raw) - allowed
+        if unknown:
+            import logging
+            logging.getLogger(__name__).warning(
+                "ignoring unknown --google-chat-config-json keys: %s",
+                sorted(unknown),
+            )
         config.google_chat = GoogleChatConfig(
-            **{k: v for k, v in raw.items() if k in {f.name for f in _fields(GoogleChatConfig)}}
+            **{k: v for k, v in raw.items() if k in allowed}
         )
 
     if google_chat_host is not None:
