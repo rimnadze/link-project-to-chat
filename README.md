@@ -74,44 +74,37 @@ The web UI is local-only — bind to `127.0.0.1` and never expose it to the publ
 
 ### Google Chat transport
 
-Google Chat support runs as an HTTPS event receiver. Install the transport
-extra, configure a Google Chat app with an HTTP endpoint, and set the required
-`google_chat` config values:
+Google Chat bots are managed by the existing `link-project-to-chat.service`
+manager unit. To add a Google Chat bot for a project:
 
-- `service_account_file`: readable Google service-account JSON path used for
-  outbound Google Chat REST calls.
-- `root_command_id`: the Google Chat `appCommandId` assigned to the `/lp2c`
-  slash command.
-- `public_url` and `endpoint_path`: the public HTTPS base URL and event path.
-- Request-verification audience settings. For `endpoint_url` mode,
-  `allowed_audiences` can be derived from `public_url + endpoint_path` when
-  omitted; for `project_number` mode, set `project_number`.
+1. Create a Cloud Console Chat app on a GCP project and download the
+   service-account JSON. One Chat app per GCP project is a Google constraint,
+   so each project needs its own GCP project + Chat app + service-account JSON.
+2. In the manager Telegram bot, open the project view and tap
+   `[Add Google Chat]`. The wizard collects the SA path, port, public URL,
+   and slash-command ID.
+3. The wizard prints a ready-to-paste nginx vhost snippet. Deploy it on your
+   reverse proxy, run certbot for the new subdomain, then `sudo nginx -t && sudo systemctl reload nginx`.
+4. From the project's Google Chat space, DM the bot. The reply arrives via
+   the manager-spawned google_chat subprocess on the configured port.
 
-If the Cloud Console UI registers your Chat app as a **Workspace add-on**
-(the default path now — once saved this setting is silently irreversible),
-Google signs incoming OIDC tokens with the project-scoped
-`service-<project_number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`
-identity rather than the standard `chat@system.gserviceaccount.com`. The
-transport detects this automatically when `project_number` is set in the
-`google_chat` config — set it to the numeric project ID (visible at the top
-of the Cloud Console Configuration tab as **Project number (App ID)**) and
-the verifier widens its accepted signer set accordingly. Standalone Chat
-apps continue to work without `project_number` set.
+Per-project config lives under `projects.<name>.google_chat`. Operational
+defaults (host, TTLs, byte caps, audience type) come from the top-level
+`google_chat` block. Each project still requires its own GCP project +
+Chat app + service-account JSON; one Chat app per GCP project is a Google
+constraint.
 
-Then start with:
+`rebuild.sh` restarts the manager, which in turn restarts every supervised
+google_chat subprocess — no separate `link-project-to-chat-gchat-*.service`
+units anymore.
 
-```bash
-pipx install "link-project-to-chat[google-chat]"
-link-project-to-chat start --project NAME --transport google_chat
-```
-
-Google Chat v1.1 supports text, slash commands (`/lp2c ...`), card buttons with
+Google Chat v1.2 supports text, slash commands (`/lp2c ...`), card buttons with
 HMAC-signed callbacks, thread-aware replies, attachment download
 (uploaded-content, capped by `attachment_max_bytes`), prompt dialogs with
 form-input submissions, and both `endpoint_url` and `project_number` audience
 verification modes.
 
-Known v1.1 limitations (carried forward from the v1 design spec):
+Known v1.2 limitations (carried forward from the v1 design spec):
 
 - The HMAC secret for callback tokens is per-process (`secrets.token_bytes(32)`
   at start). Any card or prompt posted before a bot restart becomes
@@ -123,7 +116,7 @@ Known v1.1 limitations (carried forward from the v1 design spec):
   set, so a Google retry that arrives across a restart could double-dispatch.
 - Native inline `REQUEST_DIALOG` (where the bot returns a dialog synchronously
   from the HTTP route) is intentionally deferred because it conflicts with the
-  fast-ack queue model. v1.1 uses card-button + `SUBMIT_DIALOG` instead.
+  fast-ack queue model. v1.2 uses card-button + `SUBMIT_DIALOG` instead.
 - Outbound file and voice upload is deferred. Google Chat `media.upload`
   requires user OAuth scopes, while this transport uses service-account app
   auth (`chat.bot`); `send_file` and `send_voice` return a thread-aware text

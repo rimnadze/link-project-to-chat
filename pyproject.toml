@@ -60,4 +60,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "codex_live: requires RUN_CODEX_LIVE=1 plus a real codex CLI installation and local authentication",
+    "slow: tests that take noticeable wall-clock time, often spawning real subprocesses; opt-out via -m 'not slow'",
 ]

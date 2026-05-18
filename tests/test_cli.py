@@ -1604,3 +1604,133 @@ def test_projects_edit_safety_prompt_to_default_strips_key(tmp_path):
     import json
     raw = json.loads(cfg_file.read_text())
     assert "safety_prompt" not in raw["projects"]["p"]
+
+
+def test_start_accepts_google_chat_config_json(monkeypatch, tmp_path):
+    """When --google-chat-config-json is set, the start command must use the
+    resolved blob instead of reading config.google_chat from disk."""
+    import json
+    from click.testing import CliRunner
+    from link_project_to_chat.cli import main
+
+    captured = {}
+
+    def fake_run_bot(*args, **kwargs):
+        # run_bot's positional signature is (name, path, token, ...).
+        captured["transport_kind"] = kwargs.get("transport_kind")
+        captured["google_chat"] = kwargs["config"].google_chat
+        return  # don't actually start the bot
+
+    monkeypatch.setattr("link_project_to_chat.bot.run_bot", fake_run_bot)
+
+    proj_dir = tmp_path / "alpha"
+    proj_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "allowed_users": [{"username": "alice", "role": "executor"}],
+        "projects": {"alpha": {"path": str(proj_dir), "telegram_bot_token": "tok"}},
+    }))
+
+    blob = json.dumps({
+        "service_account_file": "/keys/alpha.json",
+        "port": 8091,
+        "public_url": "https://alpha.example",
+        "root_command_id": 7,
+    })
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "--config", str(cfg_path),
+        "start",
+        "--project", "alpha",
+        "--transport", "google_chat",
+        "--google-chat-config-json", blob,
+    ])
+    assert result.exit_code == 0, result.output
+
+    # The resolved config blob got applied on top of (or in place of)
+    # whatever was in config.json's google_chat block.
+    assert captured["transport_kind"] == "google_chat"
+    assert captured["google_chat"].service_account_file == "/keys/alpha.json"
+    assert captured["google_chat"].port == 8091
+    assert captured["google_chat"].public_url == "https://alpha.example"
+    assert captured["google_chat"].root_command_id == 7
+
+
+def test_start_rejects_invalid_google_chat_config_json(monkeypatch, tmp_path):
+    """Malformed JSON should surface a friendly Click error, not a traceback."""
+    from click.testing import CliRunner
+    from link_project_to_chat.cli import main
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"projects": {"alpha": {"path": "/p", "telegram_bot_token": ""}}}')
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "--config", str(cfg_path),
+        "start",
+        "--project", "alpha",
+        "--transport", "google_chat",
+        "--google-chat-config-json", "not-valid-json{",
+    ])
+    assert result.exit_code != 0
+    assert "google-chat-config-json" in result.output.lower()
+
+
+def test_start_rejects_non_object_google_chat_config_json(monkeypatch, tmp_path):
+    """Non-object JSON (array/null) should surface a friendly Click error."""
+    from click.testing import CliRunner
+    from link_project_to_chat.cli import main
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"projects": {"alpha": {"path": "/p", "telegram_bot_token": ""}}}')
+
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "--config", str(cfg_path),
+        "start",
+        "--project", "alpha",
+        "--transport", "google_chat",
+        "--google-chat-config-json", "[1, 2, 3]",
+    ])
+    assert result.exit_code != 0
+    assert "must be a JSON object" in result.output
+
+
+def test_start_warns_on_unknown_google_chat_config_json_keys(monkeypatch, tmp_path, caplog):
+    """Unknown keys in the blob trigger a warning and are filtered out."""
+    import json
+    import logging
+    from click.testing import CliRunner
+    from link_project_to_chat.cli import main
+
+    captured = {}
+
+    def fake_run_bot(*args, **kwargs):
+        captured["config"] = kwargs.get("config")
+        return
+
+    monkeypatch.setattr("link_project_to_chat.bot.run_bot", fake_run_bot)
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text('{"projects": {"alpha": {"path": "/p", "telegram_bot_token": ""}}}')
+
+    blob = json.dumps({
+        "port": 8091,
+        "service_account_file": "/keys/a.json",
+        "future_field_we_dont_know": "ignored-value",
+    })
+
+    runner = CliRunner()
+    with caplog.at_level(logging.WARNING, logger="link_project_to_chat.cli"):
+        result = runner.invoke(main, [
+            "--config", str(cfg_path),
+            "start",
+            "--project", "alpha",
+            "--transport", "google_chat",
+            "--google-chat-config-json", blob,
+        ])
+    assert result.exit_code == 0, result.output
+    assert captured["config"].google_chat.port == 8091
+    assert any("future_field_we_dont_know" in rec.getMessage() for rec in caplog.records), \
+        f"warning not emitted: {[r.getMessage() for r in caplog.records]}"

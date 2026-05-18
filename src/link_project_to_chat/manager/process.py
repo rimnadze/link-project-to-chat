@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import json
 import logging
 import os
 import signal
@@ -13,7 +14,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .config import load_project_configs, set_project_autostart, set_team_bot_autostart
-from ..config import DEFAULT_CONFIG, load_config, resolve_start_model
+from ..config import (
+    DEFAULT_CONFIG,
+    _serialize_google_chat,
+    load_config,
+    resolve_start_model,
+)
+from ..google_chat.resolver import resolve_project_google_chat
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +201,26 @@ class ProcessManager:
         # SQLite file is opened at most once per manager lifetime.
         self._cached_session_string: str | None = None
         self._session_string_cached: bool = False
+        # PID tracking for Google Chat bot subprocesses (one per project that
+        # has a google_chat block configured). Keyed by project name; mirrors
+        # the telegram-bot tracking in ``self._processes`` but lives in a
+        # separate dict because google_chat bots have their own lifecycle
+        # (per-project HTTP listener, dedicated start/stop/restart surface).
+        # ``google_chat_pids`` is the public observable surface (used by tests
+        # and the manager UI to identify which projects are running) while
+        # ``_google_chat_procs`` holds the live ``Popen`` handle used by
+        # ``stop_google_chat_subprocess`` to ``.terminate()`` and by Task 10
+        # (crash detection) to ``.poll()``.
+        self.google_chat_pids: dict[str, int] = {}
+        self._google_chat_procs: dict[str, subprocess.Popen] = {}
+        # Projects whose google_chat subprocess exited non-zero shortly after
+        # spawn (typically a port-bind failure). The manager will NOT restart
+        # these on its own — a restart loop on an already-bound port is
+        # pointless and noisy. Operators see the entry via the manager UI and
+        # read the manager log to diagnose. Cleared when
+        # start_google_chat_subprocess is called again for the same project
+        # (operator retry path).
+        self.google_chat_failed_startups: dict[str, str] = {}
 
     def _base_cli_command(self) -> list[str]:
         cmd = [sys.executable, "-m", "link_project_to_chat.cli"]
@@ -423,6 +450,111 @@ class ProcessManager:
         self._set_team_bot_autostart(team_name, role, True)
         return True
 
+    def start_google_chat_subprocess(self, project_name: str) -> bool:
+        """Spawn a Google Chat bot subprocess for ``project_name``.
+
+        Returns False if the project has no google_chat configured (no
+        per-project override and no meaningful top-level block). Returns True
+        after ``Popen`` — does not wait for the child to fully bind the port;
+        binding failures surface via the standard non-zero-exit path.
+
+        The merged config is passed to the child as a JSON blob on
+        ``--google-chat-config-json`` so the child does not need to re-merge
+        from disk — keeps the spawn deterministic even if the operator edits
+        config.json between manager start-up and bot start.
+        """
+        if project_name in self.google_chat_pids:
+            logger.warning(
+                "google_chat subprocess already running for project %r (pid=%d)",
+                project_name, self.google_chat_pids[project_name],
+            )
+            return False
+        # Clear any prior failure marker — operator is retrying.
+        self.google_chat_failed_startups.pop(project_name, None)
+        config = load_config(self._project_config_path) if self._project_config_path else load_config()
+        resolved = resolve_project_google_chat(project_name, config)
+        if resolved is None:
+            return False
+
+        blob = json.dumps(_serialize_google_chat(resolved))
+        cmd = self._base_cli_command()
+        cmd.extend([
+            "start",
+            "--project", project_name,
+            "--transport", "google_chat",
+            "--google-chat-config-json", blob,
+        ])
+        proc = subprocess.Popen(cmd, **_process_popen_kwargs())
+        setattr(proc, "_kill_process_tree", True)
+        self.google_chat_pids[project_name] = proc.pid
+        self._google_chat_procs[project_name] = proc
+        logger.info("Started google_chat bot %s (pid=%d)", project_name, proc.pid)
+        return True
+
+    def stop_google_chat_subprocess(self, project_name: str) -> bool:
+        """Terminate the project's google_chat subprocess.
+
+        Routes through ``_terminate_process_tree`` so the kill escalates to
+        SIGKILL across the whole process group (uvicorn workers, etc.) and
+        does not silently leave a half-stuck server holding the port.
+
+        Returns True if a subprocess was tracked, False if nothing was
+        running. Clears both ``google_chat_pids`` and ``_google_chat_procs``
+        regardless of whether the underlying process was still alive — the
+        bookkeeping is the source of truth for "is this project running"
+        and must be left consistent.
+        """
+        proc = self._google_chat_procs.pop(project_name, None)
+        self.google_chat_pids.pop(project_name, None)
+        if proc is None:
+            return False
+        _terminate_process_tree(proc)
+        logger.info("Stopped google_chat bot %s", project_name)
+        return True
+
+    def restart_google_chat_subprocess(self, project_name: str) -> bool:
+        """Stop then start. Returns the ``start_google_chat_subprocess`` result.
+
+        A False stop result just means nothing was running; the start
+        result is what callers care about.
+        """
+        self.stop_google_chat_subprocess(project_name)
+        return self.start_google_chat_subprocess(project_name)
+
+    def _check_google_chat_health(self) -> None:
+        """Detect google_chat children that exited.
+
+        Walks self._google_chat_procs, calls .poll(), and reaps any child whose
+        process has exited. Non-zero exits are also recorded in
+        self.google_chat_failed_startups so the manager UI can show the operator
+        why the bot stopped.
+
+        Callers (the manager UI, Task 14's smoke test, or any future supervise
+        loop) should invoke this on every supervise tick or every UI status read.
+        """
+        reaped: list[tuple[str, int]] = []
+        for name, proc in list(self._google_chat_procs.items()):
+            status = proc.poll()
+            if status is None:
+                continue  # still running
+            reaped.append((name, status))
+        for name, status in reaped:
+            self.google_chat_pids.pop(name, None)
+            self._google_chat_procs.pop(name, None)
+            if status != 0:
+                self.google_chat_failed_startups[name] = (
+                    f"exited with status {status} (see manager log)"
+                )
+                logger.warning(
+                    "%s google_chat subprocess exited with code %d — not restarting",
+                    name, status,
+                )
+            else:
+                logger.info(
+                    "%s google_chat subprocess exited cleanly",
+                    name,
+                )
+
     def stop(self, project_name: str) -> bool:
         """Stop a running project / team-bot subprocess.
 
@@ -549,12 +681,23 @@ class ProcessManager:
         Teams whose ``group_chat_id`` is still the ``0`` sentinel (group not yet
         captured after ``/create_team``) are skipped — starting them would
         produce a bot with no group to attach to.
+
+        For every project with a resolved google_chat configuration, a Google
+        Chat subprocess is also spawned — this does NOT honor the per-project
+        ``autostart`` flag (google_chat bots run if configured at all). This
+        intentional asymmetry mirrors how the manager's webhook gateway model
+        differs from the poll-based Telegram client: a Google Chat bot only
+        receives traffic while its HTTP listener is up, so "configured" is
+        treated as the operator's standing intent to receive on that port.
         """
         count = 0
+        config = load_config(self._project_config_path) if self._project_config_path else load_config()
         for name, proj in self._load_projects().items():
             if proj.get("autostart") and self.start(name):
                 count += 1
-        config = load_config(self._project_config_path) if self._project_config_path else load_config()
+            # Also spawn a Google Chat bot for any project that has one configured.
+            if resolve_project_google_chat(name, config) is not None:
+                self.start_google_chat_subprocess(name)
         for team_name, team in config.teams.items():
             if not team.group_chat_id:
                 continue

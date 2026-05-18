@@ -947,3 +947,302 @@ def test_team_config_load_save_preserves_safety_fields(tmp_path):
     raw = json.loads(cfg_path.read_text())
     assert raw["teams"]["lpct"]["max_autonomous_turns"] == 3
     assert raw["teams"]["lpct"]["safety_mode"] == "strict"
+
+
+def test_google_chat_project_override_defaults_all_optional_except_port():
+    from link_project_to_chat.config import GoogleChatProjectOverride
+
+    override = GoogleChatProjectOverride(port=8091)
+
+    # port is required; everything else defaults to None / unset
+    assert override.port == 8091
+    assert override.service_account_file is None
+    assert override.public_url is None
+    assert override.root_command_id is None
+    assert override.project_number is None
+    assert override.auth_audience_type is None
+    assert override.host is None
+    assert override.callback_token_ttl_seconds is None
+    assert override.pending_prompt_ttl_seconds is None
+    assert override.max_message_bytes is None
+    assert override.attachment_max_bytes is None
+    assert override.endpoint_path is None
+    assert override.allowed_audiences is None
+    assert override.app_id is None
+    assert override.root_command_name is None
+
+
+def test_google_chat_project_override_port_must_be_in_range():
+    from link_project_to_chat.config import ConfigError, GoogleChatProjectOverride
+
+    with pytest.raises(ConfigError):
+        GoogleChatProjectOverride(port=0).validate()
+    with pytest.raises(ConfigError):
+        GoogleChatProjectOverride(port=70_000).validate()
+
+
+def test_google_chat_project_override_validate_accepts_valid_port():
+    from link_project_to_chat.config import GoogleChatProjectOverride
+
+    GoogleChatProjectOverride(port=8091).validate()  # no exception
+
+
+def test_google_chat_project_override_validate_rejects_invalid_audience_type():
+    from link_project_to_chat.config import ConfigError, GoogleChatProjectOverride
+
+    with pytest.raises(ConfigError, match="auth_audience_type"):
+        GoogleChatProjectOverride(port=8091, auth_audience_type="invalid").validate()
+
+
+def test_parse_google_chat_override_minimal():
+    from link_project_to_chat.config import _parse_google_chat_override
+
+    override = _parse_google_chat_override({"port": 8091})
+    assert override.port == 8091
+    assert override.service_account_file is None
+
+
+def test_parse_google_chat_override_full():
+    from link_project_to_chat.config import _parse_google_chat_override
+
+    raw = {
+        "port": 8092,
+        "service_account_file": "/keys/proj.json",
+        "public_url": "https://proj.example.com",
+        "root_command_id": 7,
+        "project_number": "12345",
+    }
+    override = _parse_google_chat_override(raw)
+    assert override.port == 8092
+    assert override.service_account_file == "/keys/proj.json"
+    assert override.public_url == "https://proj.example.com"
+    assert override.root_command_id == 7
+    assert override.project_number == "12345"
+
+
+def test_parse_google_chat_override_missing_port_raises():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="port"):
+        _parse_google_chat_override({"public_url": "https://x.test"})
+
+
+def test_serialize_google_chat_override_omits_none_fields():
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        _serialize_google_chat_override,
+    )
+
+    raw = _serialize_google_chat_override(
+        GoogleChatProjectOverride(port=8091, public_url="https://x.test")
+    )
+    assert raw == {"port": 8091, "public_url": "https://x.test"}
+    assert "service_account_file" not in raw  # None fields stripped
+
+
+def test_google_chat_override_round_trip():
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        _parse_google_chat_override,
+        _serialize_google_chat_override,
+    )
+
+    original = GoogleChatProjectOverride(
+        port=8091,
+        service_account_file="/keys/a.json",
+        public_url="https://a.example",
+        root_command_id=3,
+    )
+    raw = _serialize_google_chat_override(original)
+    reparsed = _parse_google_chat_override(raw)
+    assert reparsed == original
+
+
+def test_parse_google_chat_override_rejects_non_list_allowed_audiences():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="allowed_audiences"):
+        _parse_google_chat_override({"port": 8091, "allowed_audiences": "not-a-list"})
+
+
+def test_parse_google_chat_override_rejects_invalid_audience_type():
+    from link_project_to_chat.config import ConfigError, _parse_google_chat_override
+
+    with pytest.raises(ConfigError, match="auth_audience_type"):
+        _parse_google_chat_override({"port": 8091, "auth_audience_type": "bogus"})
+
+
+def test_project_config_google_chat_defaults_none():
+    from link_project_to_chat.config import ProjectConfig
+
+    pc = ProjectConfig(path="/p", telegram_bot_token="")
+    assert pc.google_chat is None
+
+
+def test_project_config_round_trips_google_chat_override(tmp_path):
+    import json
+    from link_project_to_chat.config import (
+        GoogleChatProjectOverride,
+        load_config,
+        save_config,
+    )
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "alpha": {
+                "path": "/p",
+                "telegram_bot_token": "",
+                "google_chat": {
+                    "port": 8091,
+                    "service_account_file": "/keys/a.json",
+                    "public_url": "https://a.example",
+                    "root_command_id": 5,
+                },
+            }
+        }
+    }))
+
+    loaded = load_config(cfg_path)
+    alpha = loaded.projects["alpha"]
+    assert alpha.google_chat == GoogleChatProjectOverride(
+        port=8091,
+        service_account_file="/keys/a.json",
+        public_url="https://a.example",
+        root_command_id=5,
+    )
+
+    save_config(loaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert raw["projects"]["alpha"]["google_chat"] == {
+        "port": 8091,
+        "service_account_file": "/keys/a.json",
+        "public_url": "https://a.example",
+        "root_command_id": 5,
+    }
+
+
+def test_project_config_load_rejects_invalid_google_chat_block(tmp_path):
+    import json
+    from link_project_to_chat.config import ConfigError, load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {"alpha": {"path": "/p", "telegram_bot_token": "", "google_chat": {}}}
+    }))
+
+    with pytest.raises(ConfigError, match="port"):
+        load_config(cfg_path)
+
+
+def test_project_config_warns_on_non_dict_google_chat(tmp_path, caplog):
+    import json
+    import logging
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "alpha": {
+                "path": "/p",
+                "telegram_bot_token": "",
+                "google_chat": "not-a-dict",
+            }
+        }
+    }))
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_config(cfg_path)
+
+    assert loaded.projects["alpha"].google_chat is None
+    assert any("google_chat" in rec.getMessage().lower() for rec in caplog.records)
+
+
+def test_migration_auto_claims_for_single_project(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config, save_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "solo": {"path": "/p", "telegram_bot_token": ""},
+        },
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["solo"].google_chat is not None
+    assert loaded.projects["solo"].google_chat.port == 8090
+
+    save_config(loaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert "google_chat" in raw["projects"]["solo"]
+
+
+def test_migration_idempotent(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config, save_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {"solo": {"path": "/p", "telegram_bot_token": ""}},
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    # First load → migration auto-claims the single project with port=8090.
+    loaded = load_config(cfg_path)
+    assert loaded.projects["solo"].google_chat is not None
+    assert loaded.projects["solo"].google_chat.port == 8090
+
+    # Operator subsequently bumps the override's port via the wizard (Task 12).
+    # Save with the bumped port to simulate that.
+    loaded.projects["solo"].google_chat.port = 9100
+    save_config(loaded, cfg_path)
+
+    # Re-load: migration MUST NOT fire again. The bumped port must survive.
+    reloaded = load_config(cfg_path)
+    assert reloaded.projects["solo"].google_chat is not None
+    assert reloaded.projects["solo"].google_chat.port == 9100, (
+        "migration re-fired and overwrote the operator's port choice"
+    )
+
+    # And the raw JSON must reflect the bumped port, not the original 8090.
+    save_config(reloaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert raw["projects"]["solo"]["google_chat"]["port"] == 9100
+
+
+def test_migration_skips_when_multiple_projects_no_overrides(tmp_path):
+    import json
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "a": {"path": "/a", "telegram_bot_token": ""},
+            "b": {"path": "/b", "telegram_bot_token": ""},
+        },
+        "google_chat": {
+            "service_account_file": "/keys/sa.json",
+            "public_url": "https://x.example",
+            "port": 8090,
+            "root_command_id": 1,
+        },
+    }))
+
+    loaded = load_config(cfg_path)
+    # Ambiguous which project to claim — migration MUST NOT guess.
+    assert loaded.projects["a"].google_chat is None
+    assert loaded.projects["b"].google_chat is None
+    # The top-level block is preserved, the operator will use the wizard to claim.
+    assert loaded.google_chat.port == 8090

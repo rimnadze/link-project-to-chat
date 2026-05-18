@@ -469,6 +469,16 @@ def configure(
 @click.option("--google-chat-host", default=None, help="Host override for Google Chat transport.")
 @click.option("--google-chat-port", type=int, default=None, help="Port override for Google Chat transport.")
 @click.option("--google-chat-public-url", default=None, help="Public URL override for Google Chat transport.")
+@click.option(
+    "--google-chat-config-json",
+    "google_chat_config_json",
+    default=None,
+    help=(
+        "JSON-encoded resolved GoogleChatConfig used in place of "
+        "config.google_chat. Intended for use by ProcessManager when "
+        "spawning per-project google_chat subprocesses."
+    ),
+)
 @click.pass_context
 def start(
     ctx,
@@ -489,6 +499,7 @@ def start(
     google_chat_host: str | None,
     google_chat_port: int | None,
     google_chat_public_url: str | None,
+    google_chat_config_json: str | None,
 ):
     """Start the Telegram bot.
 
@@ -531,6 +542,39 @@ def start(
         return
 
     config = load_config(cfg_path)
+
+    if google_chat_config_json:
+        # ProcessManager (Task 7) spawns google_chat subprocesses with the
+        # per-project resolved GoogleChatConfig serialized into this flag, so
+        # the child doesn't re-resolve the merge from disk. Every field is
+        # already merged upstream, so this is a direct construct that replaces
+        # config.google_chat wholesale.
+        import json as _json
+        from dataclasses import fields as _fields
+        from .config import GoogleChatConfig
+        try:
+            raw = _json.loads(google_chat_config_json)
+        except _json.JSONDecodeError as exc:
+            raise click.BadParameter(
+                f"--google-chat-config-json: invalid JSON ({exc})",
+                param_hint="--google-chat-config-json",
+            ) from exc
+        if not isinstance(raw, dict):
+            raise click.BadParameter(
+                "--google-chat-config-json must be a JSON object",
+                param_hint="--google-chat-config-json",
+            )
+        allowed = {f.name for f in _fields(GoogleChatConfig)}
+        unknown = set(raw) - allowed
+        if unknown:
+            import logging
+            logging.getLogger(__name__).warning(
+                "ignoring unknown --google-chat-config-json keys: %s",
+                sorted(unknown),
+            )
+        config.google_chat = GoogleChatConfig(
+            **{k: v for k, v in raw.items() if k in allowed}
+        )
 
     if google_chat_host is not None:
         config.google_chat.host = google_chat_host
