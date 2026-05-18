@@ -487,10 +487,34 @@ class GoogleChatTransport:
         elif event_type == "CARD_CLICKED":
             await self._dispatch_card_clicked(payload)
         else:
-            logger.debug("GoogleChatTransport: ignoring unknown event type=%r", event_type)
+            # [TRACE v2] Promote to WARNING so we see card-click drops in
+            # journald. Strip alongside the addon-envelope diagnostic.
+            logger.warning(
+                "[TRACE-v2] dropping event type=%r, payload.keys=%s",
+                event_type,
+                sorted(payload.keys()) if isinstance(payload, dict) else "non-dict",
+            )
 
     def _maybe_unwrap_addon_envelope(self, payload: dict) -> dict:
         """Rewrite a Workspace-add-on envelope to the standalone Chat-app shape."""
+        # [TRACE v2] Capture full payload key shape for every add-on event so
+        # we can identify the missing card-click payload key. Strip once the
+        # CARD_CLICKED dispatch bug is fixed.
+        if "commonEventObject" in payload:
+            chat_for_log = payload.get("chat") or {}
+            common_for_log = payload.get("commonEventObject") or {}
+            logger.warning(
+                "[TRACE-v2] addon envelope: payload.keys=%s, "
+                "chat.keys=%s, "
+                "commonEventObject.keys=%s, "
+                "commonEventObject.parameters=%s, "
+                "commonEventObject.invokedFunction=%s",
+                sorted(payload.keys()),
+                sorted(chat_for_log.keys()) if isinstance(chat_for_log, dict) else f"non-dict:{type(chat_for_log).__name__}",
+                sorted(common_for_log.keys()) if isinstance(common_for_log, dict) else f"non-dict:{type(common_for_log).__name__}",
+                common_for_log.get("parameters") if isinstance(common_for_log, dict) else None,
+                common_for_log.get("invokedFunction") if isinstance(common_for_log, dict) else None,
+            )
         if "commonEventObject" not in payload:
             return payload
         chat = payload.get("chat") or {}
