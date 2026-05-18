@@ -1544,7 +1544,22 @@ class ManagerBot(AuthMixin):
                 "Google Chat wizard is in an unknown state. Start over via the project view.",
             )
 
+    def _gchat_is_keep(self, wizard: dict, text: str) -> bool:
+        """``/keep`` preserves the prefilled value in edit mode (Task 13).
+
+        Only meaningful when the wizard was opened from the Edit button: the
+        starter prepopulates ``wizard["data"]`` with the current override
+        values, so ``/keep`` just advances without overwriting. The Add
+        wizard ignores ``/keep`` and falls through to normal validation
+        (which will reject ``/keep`` as an invalid path/port/URL/int).
+        """
+        return wizard.get("kind") == "edit" and text == "/keep"
+
     async def _gchat_step_sa_file(self, wizard: dict, chat, text: str) -> None:
+        if self._gchat_is_keep(wizard, text):
+            wizard["step"] = "port"
+            await self._gchat_prompt_port(wizard, chat)
+            return
         if not text:
             await self._transport.send_text(
                 chat, "Enter the absolute path to the service-account JSON file:",
@@ -1552,12 +1567,26 @@ class ManagerBot(AuthMixin):
             return
         wizard["data"]["service_account_file"] = text
         wizard["step"] = "port"
-        await self._transport.send_text(
-            chat,
-            "Step 2 of 4 — enter the port for this Google Chat bot (1..65535):",
-        )
+        await self._gchat_prompt_port(wizard, chat)
+
+    async def _gchat_prompt_port(self, wizard: dict, chat) -> None:
+        if wizard.get("kind") == "edit":
+            await self._transport.send_text(
+                chat,
+                "Step 2 of 4 — enter the port for this Google Chat bot (1..65535),\n"
+                f"or `/keep` to keep the current value ({wizard['data'].get('port')}):",
+            )
+        else:
+            await self._transport.send_text(
+                chat,
+                "Step 2 of 4 — enter the port for this Google Chat bot (1..65535):",
+            )
 
     async def _gchat_step_port(self, wizard: dict, chat, text: str) -> None:
+        if self._gchat_is_keep(wizard, text):
+            wizard["step"] = "public_url"
+            await self._gchat_prompt_public_url(wizard, chat)
+            return
         try:
             port = int(text)
         except ValueError:
@@ -1572,13 +1601,27 @@ class ManagerBot(AuthMixin):
             return
         wizard["data"]["port"] = port
         wizard["step"] = "public_url"
-        await self._transport.send_text(
-            chat,
-            "Step 3 of 4 — enter the public HTTPS URL where Google Chat will reach this bot\n"
-            "(e.g. https://alpha.example.com):",
-        )
+        await self._gchat_prompt_public_url(wizard, chat)
+
+    async def _gchat_prompt_public_url(self, wizard: dict, chat) -> None:
+        if wizard.get("kind") == "edit":
+            await self._transport.send_text(
+                chat,
+                "Step 3 of 4 — enter the public HTTPS URL where Google Chat will reach this bot,\n"
+                f"or `/keep` to keep the current value ({wizard['data'].get('public_url')}):",
+            )
+        else:
+            await self._transport.send_text(
+                chat,
+                "Step 3 of 4 — enter the public HTTPS URL where Google Chat will reach this bot\n"
+                "(e.g. https://alpha.example.com):",
+            )
 
     async def _gchat_step_public_url(self, wizard: dict, chat, text: str) -> None:
+        if self._gchat_is_keep(wizard, text):
+            wizard["step"] = "root_command_id"
+            await self._gchat_prompt_command_id(wizard, chat)
+            return
         from urllib.parse import urlparse
         try:
             parsed = urlparse(text)
@@ -1596,15 +1639,28 @@ class ManagerBot(AuthMixin):
             return
         wizard["data"]["public_url"] = text
         wizard["step"] = "root_command_id"
-        await self._transport.send_text(
-            chat,
-            "Step 4 of 4 — enter the Cloud Console slash-command ID (integer)\n"
-            "(numeric ID from the Google Chat app's slash-command settings):",
-        )
+        await self._gchat_prompt_command_id(wizard, chat)
+
+    async def _gchat_prompt_command_id(self, wizard: dict, chat) -> None:
+        if wizard.get("kind") == "edit":
+            await self._transport.send_text(
+                chat,
+                "Step 4 of 4 — enter the Cloud Console slash-command ID (integer),\n"
+                f"or `/keep` to keep the current value ({wizard['data'].get('root_command_id')}):",
+            )
+        else:
+            await self._transport.send_text(
+                chat,
+                "Step 4 of 4 — enter the Cloud Console slash-command ID (integer)\n"
+                "(numeric ID from the Google Chat app's slash-command settings):",
+            )
 
     async def _gchat_step_root_command_id(
         self, ctx: ContextTypes.DEFAULT_TYPE, wizard: dict, chat, text: str,
     ) -> None:
+        if self._gchat_is_keep(wizard, text):
+            await self._finalize_gchat_wizard(ctx, wizard, chat)
+            return
         try:
             cmd_id = int(text)
         except ValueError:
@@ -1618,7 +1674,16 @@ class ManagerBot(AuthMixin):
             )
             return
         wizard["data"]["root_command_id"] = cmd_id
-        await self._finalize_add_google_chat_wizard(ctx, wizard, chat)
+        await self._finalize_gchat_wizard(ctx, wizard, chat)
+
+    async def _finalize_gchat_wizard(
+        self, ctx: ContextTypes.DEFAULT_TYPE, wizard: dict, chat,
+    ) -> None:
+        """Dispatch to the add- or edit-flavored finalizer based on wizard kind."""
+        if wizard.get("kind") == "edit":
+            await self._finalize_edit_gchat_wizard(ctx, wizard, chat)
+        else:
+            await self._finalize_add_google_chat_wizard(ctx, wizard, chat)
 
     async def _finalize_add_google_chat_wizard(
         self, ctx: ContextTypes.DEFAULT_TYPE, wizard: dict, chat,
@@ -1663,6 +1728,125 @@ class ManagerBot(AuthMixin):
                  "(check logs and `start_google_chat_subprocess`)."
         )
         await self._transport.send_text(chat, status_line + "\n\n" + nginx_snippet)
+
+    # ------------------------------------------------------------------
+    # Task 13: Edit / Remove / Restart Google Chat handlers.
+    #
+    # The Edit wizard is a variant of the Add wizard (Task 12): same 4
+    # steps, but the operator can send ``/keep`` at any step to preserve
+    # the current value (prefilled into ``wizard["data"]`` by the starter).
+    # On finalize, ``restart_google_chat_subprocess`` is called instead of
+    # ``start_*`` because the bot is already running.
+    # ------------------------------------------------------------------
+
+    async def _start_edit_google_chat_wizard(
+        self, click: "ButtonClick", ctx_user_data: dict | None, name: str,
+    ) -> None:
+        """Arm the edit wizard for ``name`` and prompt for the SA-file path.
+
+        Loads the current ``google_chat`` block from disk and seeds
+        ``wizard["data"]`` so each step's ``/keep`` branch can fall back to
+        the stored value. Bails out if no override exists (operator should
+        use Add instead).
+        """
+        if ctx_user_data is None:
+            await self._transport.edit_text(
+                click.message,
+                "Cannot start the Google Chat wizard — no per-user state slot.",
+            )
+            return
+        project = self._load_projects().get(name, {})
+        current = project.get("google_chat") or {}
+        if not current:
+            await self._transport.edit_text(
+                click.message,
+                f"No Google Chat override to edit for '{name}'. Use [Add Google Chat] instead.",
+            )
+            return
+        ctx_user_data["gchat_wizard"] = {
+            "name": name,
+            "step": "sa_file",
+            "kind": "edit",
+            "data": dict(current),
+        }
+        await self._transport.edit_text(
+            click.message,
+            (
+                f"Edit Google Chat for '{name}' — step 1 of 4.\n\n"
+                f"Current service-account JSON: {current.get('service_account_file', '(none)')}\n"
+                "Send a new absolute path, or `/keep` to keep the current value.\n"
+                "(/cancel to abort)"
+            ),
+        )
+
+    async def _finalize_edit_gchat_wizard(
+        self, ctx: ContextTypes.DEFAULT_TYPE, wizard: dict, chat,
+    ) -> None:
+        """Persist the (possibly partially updated) override and restart the bot."""
+        name = wizard["name"]
+        data = wizard["data"]
+        ctx.user_data.pop("gchat_wizard", None)
+
+        from ..config import _patch_json
+        cfg_path = self._project_config_path or DEFAULT_CONFIG
+        gchat_block = {
+            "port": data["port"],
+            "service_account_file": data["service_account_file"],
+            "public_url": data["public_url"],
+            "root_command_id": data["root_command_id"],
+        }
+
+        def _patch(raw: dict) -> None:
+            projects = raw.setdefault("projects", {})
+            project = projects.get(name)
+            if not isinstance(project, dict):
+                return
+            project["google_chat"] = gchat_block
+
+        _patch_json(_patch, cfg_path)
+
+        restarted = self._pm.restart_google_chat_subprocess(name)
+        status_line = (
+            f"Google Chat override updated for '{name}' and bot restarted."
+            if restarted
+            else f"Google Chat override updated for '{name}', but the bot did not restart "
+                 "(check logs and `restart_google_chat_subprocess`)."
+        )
+        await self._transport.send_text(chat, status_line)
+
+    async def _handle_restart_gchat(self, click: "ButtonClick", name: str) -> None:
+        """Operator clicked Restart Google Chat. No config write — just a PM call."""
+        restarted = self._pm.restart_google_chat_subprocess(name)
+        msg = (
+            f"Google Chat subprocess restarted for '{name}'."
+            if restarted
+            else f"Restart for '{name}' failed (config missing?)."
+        )
+        await self._transport.edit_text(click.message, msg)
+
+    async def _handle_remove_gchat(self, click: "ButtonClick", name: str) -> None:
+        """Operator clicked Remove Google Chat. Clear the override + stop the bot.
+
+        nginx vhost is intentionally left intact — the operator may want to
+        keep the subdomain available or clean it up manually. We just print
+        a one-liner reminder so they know to do that themselves.
+        """
+        from ..config import _patch_json
+
+        def _patch(raw: dict) -> None:
+            project = raw.get("projects", {}).get(name)
+            if not isinstance(project, dict):
+                return
+            project.pop("google_chat", None)
+
+        cfg_path = self._project_config_path or DEFAULT_CONFIG
+        _patch_json(_patch, cfg_path)
+        self._pm.stop_google_chat_subprocess(name)
+        await self._transport.edit_text(
+            click.message,
+            f"Google Chat override removed for '{name}'. nginx vhost left intact — "
+            "clean it up manually if you no longer need the subdomain.",
+        )
 
     def _render_nginx_snippet(self, name: str, data: dict) -> str:
         """Render an nginx vhost snippet for the given Google Chat override.
@@ -2680,12 +2864,12 @@ class ManagerBot(AuthMixin):
 
         value = click.value
 
-        # Task 12: the proj_add_gchat_<name> callback opens the 4-step Add
-        # wizard (SA file → port → public URL → root command ID). Task 11's
-        # stub for the remaining proj_<verb>_gchat_<name> family is still
-        # intact below so edit/restart/remove don't misroute to the generic
-        # ``proj_edit_``/``proj_remove_`` branches against a phantom project
-        # named ``gchat_<name>``. Task 13 will replace those.
+        # Tasks 12/13: the proj_<verb>_gchat_<name> family must be matched
+        # before the generic ``proj_edit_``/``proj_remove_`` branches below,
+        # otherwise prefix matching routes ``proj_edit_gchat_alpha`` to the
+        # legacy edit flow against a phantom project named ``gchat_alpha``.
+        # Task 12 added the Add wizard; Task 13 wired up Edit / Restart /
+        # Remove with their own dedicated handlers.
         if value.startswith("proj_add_gchat_"):
             if not await self._require_executor_button(click):
                 return
@@ -2693,15 +2877,25 @@ class ManagerBot(AuthMixin):
             await self._start_add_google_chat_wizard(click, ctx_user_data, name)
             return
 
-        if (
-            value.startswith("proj_edit_gchat_")
-            or value.startswith("proj_restart_gchat_")
-            or value.startswith("proj_remove_gchat_")
-        ):
-            await self._transport.edit_text(
-                click.message,
-                "Google Chat management coming in Task 13.",
-            )
+        if value.startswith("proj_edit_gchat_"):
+            if not await self._require_executor_button(click):
+                return
+            name = value[len("proj_edit_gchat_"):]
+            await self._start_edit_google_chat_wizard(click, ctx_user_data, name)
+            return
+
+        if value.startswith("proj_restart_gchat_"):
+            if not await self._require_executor_button(click):
+                return
+            name = value[len("proj_restart_gchat_"):]
+            await self._handle_restart_gchat(click, name)
+            return
+
+        if value.startswith("proj_remove_gchat_"):
+            if not await self._require_executor_button(click):
+                return
+            name = value[len("proj_remove_gchat_"):]
+            await self._handle_remove_gchat(click, name)
             return
 
         if value.startswith("proj_info_"):

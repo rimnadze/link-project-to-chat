@@ -121,14 +121,15 @@ def test_project_view_shows_edit_remove_restart_when_override_exists(tmp_path):
 async def test_clicking_gchat_buttons_does_not_misroute_to_edit_remove(
     tmp_path, callback_value
 ):
-    """Until Task 13 lands, edit/restart/remove google_chat buttons must NOT
-    trigger the regular edit/remove handler against a project named
-    'gchat_<name>'.
+    """Edit/restart/remove google_chat buttons must NOT trigger the regular
+    edit/remove handler against a phantom project named 'gchat_<name>'.
 
     The dispatch chain in ``_dispatch_button_click`` uses prefix matching,
-    so without the catch-all stub ``proj_edit_gchat_alpha`` would match
-    ``proj_edit_`` first and route to the legacy edit flow for a phantom
-    project named ``gchat_alpha``. This test pins the stub's behaviour.
+    so without the dedicated branches in front of the generic ones,
+    ``proj_edit_gchat_alpha`` would match ``proj_edit_`` first and route
+    to the legacy edit flow for a phantom project ``gchat_alpha``.
+    Task 13 replaced the stub with real handlers — this regression test
+    still pins the ordering so a refactor can't reintroduce the leak.
     """
     cfg_path = _write_project_config(
         tmp_path,
@@ -164,15 +165,12 @@ async def test_clicking_gchat_buttons_does_not_misroute_to_edit_remove(
 
     await bot._dispatch_button_click(click)
 
-    # The stub edits the clicked message with a "coming soon" notice and
-    # returns early. If misrouting happened, the legacy proj_edit_/proj_remove_
-    # branches would have rendered an edit menu or a removal confirmation
-    # for a phantom project named "gchat_alpha".
-    assert fake.edited_messages, "stub must edit_text the clicked message"
+    # Every real handler edits the clicked message — restart with a
+    # confirmation, edit with the wizard prompt or "use Add instead",
+    # remove with a "removed" confirmation. None of them should expose
+    # a phantom ``gchat_alpha`` project or the legacy "choose field:" picker.
+    assert fake.edited_messages, "handler must edit_text the clicked message"
     final = fake.edited_messages[-1]
-    assert "Google Chat" in final.text
-    # The legacy edit flow renders "Edit 'gchat_alpha' — choose field:" and
-    # the legacy remove flow lists projects — neither phrase should appear.
     assert "gchat_alpha" not in final.text
     assert "choose field" not in final.text
 
@@ -542,4 +540,280 @@ async def test_add_google_chat_wizard_viewer_cannot_start(tmp_path):
     await bot._dispatch_button_click(click)
 
     # Wizard must not have armed itself for a viewer.
+    assert "gchat_wizard" not in state
+
+
+# ─── Task 13: Edit / Remove / Restart Google Chat handlers ──────────────────
+
+
+def _write_alpha_with_gchat(tmp_path: Path) -> Path:
+    return _write_project_config(
+        tmp_path,
+        {
+            "alpha": {
+                "path": str(tmp_path),
+                "telegram_bot_token": "tok",
+                "google_chat": {
+                    "port": 8091,
+                    "service_account_file": "/keys/a.json",
+                    "public_url": "https://a.example",
+                    "root_command_id": 7,
+                },
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_google_chat_clears_override_and_stops_subprocess(tmp_path):
+    """Clicking Remove on a project with a google_chat block: clears the
+    override, calls ProcessManager.stop_google_chat_subprocess, replies with
+    a confirmation."""
+    from link_project_to_chat.config import load_config
+
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, _state = _make_wizard_click("proj_remove_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["alpha"].google_chat is None
+    bot._pm.stop_google_chat_subprocess.assert_called_once_with("alpha")
+    assert fake.edited_messages, "remove handler must edit_text the clicked message"
+    final = fake.edited_messages[-1].text.lower()
+    assert "removed" in final
+
+
+@pytest.mark.asyncio
+async def test_remove_google_chat_viewer_cannot_run(tmp_path):
+    """A viewer cannot remove a Google Chat override."""
+    from link_project_to_chat.config import load_config
+
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = ManagerBot(
+        "TOKEN",
+        MagicMock(),
+        allowed_users=[
+            AllowedUser(
+                username="op", role="viewer", locked_identities=["telegram:1"]
+            ),
+        ],
+        project_config_path=cfg_path,
+    )
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, _state = _make_wizard_click("proj_remove_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    # Override must still be on disk; PM must not have been called to stop.
+    loaded = load_config(cfg_path)
+    assert loaded.projects["alpha"].google_chat is not None
+    bot._pm.stop_google_chat_subprocess.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_google_chat_calls_pm_restart(tmp_path):
+    """Clicking Restart: calls ProcessManager.restart_google_chat_subprocess.
+    Config is NOT touched."""
+    from link_project_to_chat.config import load_config
+
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = _make_bot(cfg_path)
+    bot._pm.restart_google_chat_subprocess.return_value = True
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, _state = _make_wizard_click("proj_restart_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    bot._pm.restart_google_chat_subprocess.assert_called_once_with("alpha")
+    # Config block must remain intact.
+    loaded = load_config(cfg_path)
+    assert loaded.projects["alpha"].google_chat is not None
+    assert loaded.projects["alpha"].google_chat.port == 8091
+    # Operator gets a confirmation.
+    assert fake.edited_messages
+    assert "restart" in fake.edited_messages[-1].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_restart_google_chat_viewer_cannot_run(tmp_path):
+    """A viewer cannot trigger a Google Chat restart."""
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = ManagerBot(
+        "TOKEN",
+        MagicMock(),
+        allowed_users=[
+            AllowedUser(
+                username="op", role="viewer", locked_identities=["telegram:1"]
+            ),
+        ],
+        project_config_path=cfg_path,
+    )
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, _state = _make_wizard_click("proj_restart_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    bot._pm.restart_google_chat_subprocess.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_google_chat_wizard_prefills_current_values(tmp_path):
+    """Clicking Edit shows the current SA file path so operator can `/keep` it."""
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_edit_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    assert fake.edited_messages, "edit handler must edit_text with a wizard prompt"
+    first_prompt = fake.edited_messages[-1].text
+    assert "/keys/a.json" in first_prompt
+    # The wizard must be armed in edit mode with the current values prefilled.
+    wizard = state.get("gchat_wizard")
+    assert wizard is not None
+    assert wizard.get("kind") == "edit"
+    assert wizard.get("name") == "alpha"
+    assert wizard["step"] == "sa_file"
+    # Prefilled data so /keep can fall back to the current values.
+    assert wizard["data"]["service_account_file"] == "/keys/a.json"
+    assert wizard["data"]["port"] == 8091
+    assert wizard["data"]["public_url"] == "https://a.example"
+    assert wizard["data"]["root_command_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_edit_google_chat_wizard_keep_preserves_all_fields(tmp_path):
+    """Sending `/keep` at every step preserves the existing override and triggers
+    a restart on finalize."""
+    from link_project_to_chat.config import load_config
+    from unittest.mock import MagicMock as _MM
+
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = _make_bot(cfg_path)
+    bot._pm.restart_google_chat_subprocess.return_value = True
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_edit_gchat_alpha")
+    await bot._dispatch_button_click(click)
+    assert state["gchat_wizard"]["step"] == "sa_file"
+
+    # /keep at every step — values should be preserved.
+    for _ in range(4):
+        update = _make_text_update("/keep")
+        ctx = _MM()
+        ctx.user_data = state
+        await bot._edit_field_save(update, ctx)
+
+    assert "gchat_wizard" not in state, "wizard should finalize after the 4th step"
+    loaded = load_config(cfg_path)
+    gc = loaded.projects["alpha"].google_chat
+    assert gc is not None
+    assert gc.service_account_file == "/keys/a.json"
+    assert gc.port == 8091
+    assert gc.public_url == "https://a.example"
+    assert gc.root_command_id == 7
+    # Edit finalize must call restart (not start).
+    bot._pm.restart_google_chat_subprocess.assert_called_once_with("alpha")
+    bot._pm.start_google_chat_subprocess.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_google_chat_wizard_mixed_keep_and_update(tmp_path):
+    """A mix of /keep and new values: keep the SA file, update port + URL,
+    keep the command-id."""
+    from link_project_to_chat.config import load_config
+    from unittest.mock import MagicMock as _MM
+
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = _make_bot(cfg_path)
+    bot._pm.restart_google_chat_subprocess.return_value = True
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_edit_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    # Step 1: keep SA file
+    update = _make_text_update("/keep")
+    ctx = _MM(); ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+    assert state["gchat_wizard"]["step"] == "port"
+
+    # Step 2: change port
+    update = _make_text_update("9999")
+    ctx = _MM(); ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+    assert state["gchat_wizard"]["step"] == "public_url"
+
+    # Step 3: change URL
+    update = _make_text_update("https://newhost.example.com")
+    ctx = _MM(); ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+    assert state["gchat_wizard"]["step"] == "root_command_id"
+
+    # Step 4: keep command id
+    update = _make_text_update("/keep")
+    ctx = _MM(); ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+
+    assert "gchat_wizard" not in state
+    loaded = load_config(cfg_path)
+    gc = loaded.projects["alpha"].google_chat
+    assert gc.service_account_file == "/keys/a.json"
+    assert gc.port == 9999
+    assert gc.public_url == "https://newhost.example.com"
+    assert gc.root_command_id == 7
+    bot._pm.restart_google_chat_subprocess.assert_called_once_with("alpha")
+
+
+@pytest.mark.asyncio
+async def test_edit_google_chat_wizard_without_existing_override(tmp_path):
+    """Clicking Edit on a project that has no google_chat override should
+    bail out gracefully (the operator should use Add instead)."""
+    cfg_path = _write_project_config(
+        tmp_path,
+        {"alpha": {"path": str(tmp_path), "telegram_bot_token": "tok"}},
+    )
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_edit_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    assert "gchat_wizard" not in state
+    assert fake.edited_messages
+    assert "Add" in fake.edited_messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_edit_google_chat_wizard_viewer_cannot_start(tmp_path):
+    """A viewer-role user must not be able to start the Edit wizard."""
+    cfg_path = _write_alpha_with_gchat(tmp_path)
+    bot = ManagerBot(
+        "TOKEN",
+        MagicMock(),
+        allowed_users=[
+            AllowedUser(
+                username="op", role="viewer", locked_identities=["telegram:1"]
+            ),
+        ],
+        project_config_path=cfg_path,
+    )
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_edit_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
     assert "gchat_wizard" not in state
