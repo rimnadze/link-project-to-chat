@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from link_project_to_chat.config import (
     Config,
     GoogleChatConfig,
@@ -216,3 +218,67 @@ def test_restart_google_chat_subprocess_calls_stop_then_start(monkeypatch, tmp_p
 
     assert pm.restart_google_chat_subprocess("alpha") is True
     assert events == ["terminate", "popen"]
+
+
+def test_start_autostart_spawns_telegram_and_google_chat(monkeypatch, tmp_path):
+    """A project with both bot_token and a google_chat override should get
+    both subprocesses on autostart."""
+    spawned: list[list[str]] = []
+
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd)
+        class FakeProc:
+            pid = 10000 + len(spawned)
+            def poll(self): return None
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    # Build a config with one project having both Telegram + google_chat,
+    # and one project Telegram-only. Both have autostart=True so
+    # start_autostart actually iterates them.
+    config = Config(
+        projects={
+            "alpha": ProjectConfig(
+                path=str(tmp_path),
+                telegram_bot_token="abc:123",
+                autostart=True,
+                google_chat=GoogleChatProjectOverride(
+                    port=8091,
+                    service_account_file="/keys/a.json",
+                    public_url="https://a.example",
+                    root_command_id=7,
+                ),
+            ),
+            "beta": ProjectConfig(  # Telegram-only
+                path=str(tmp_path),
+                telegram_bot_token="xyz:789",
+                autostart=True,
+            ),
+        },
+        google_chat=GoogleChatConfig(host="127.0.0.1"),
+    )
+
+    cfg_path = tmp_path / "config.json"
+    save_config(config, cfg_path)
+    pm = ProcessManager(project_config_path=cfg_path)
+
+    # Use whatever the actual autostart method is named on this codebase.
+    # Common alternatives: start_autostart, start_all, run_autostart.
+    if hasattr(pm, "start_autostart"):
+        pm.start_autostart()
+    elif hasattr(pm, "start_all"):
+        pm.start_all()
+    else:
+        pytest.fail("ProcessManager has no autostart method — check the API")
+
+    # Discriminate spawn types by argv content.
+    telegram_spawns = [c for c in spawned if "--transport" not in c or "google_chat" not in c]
+    google_chat_spawns = [c for c in spawned if "--transport" in c and "google_chat" in c]
+    # Alpha + Beta both get Telegram bots (existing behavior).
+    assert len(telegram_spawns) == 2, f"Expected 2 telegram spawns, got {len(telegram_spawns)}: {spawned}"
+    # Only Alpha gets a Google Chat bot.
+    assert len(google_chat_spawns) == 1, f"Expected 1 google_chat spawn, got {len(google_chat_spawns)}: {spawned}"
+    assert "alpha" in google_chat_spawns[0]
+    assert "alpha" in pm.google_chat_pids
+    assert "beta" not in pm.google_chat_pids

@@ -639,10 +639,13 @@ class ProcessManager:
         produce a bot with no group to attach to.
         """
         count = 0
+        config = load_config(self._project_config_path) if self._project_config_path else load_config()
         for name, proj in self._load_projects().items():
             if proj.get("autostart") and self.start(name):
                 count += 1
-        config = load_config(self._project_config_path) if self._project_config_path else load_config()
+            # Also spawn a Google Chat bot for any project that has one configured.
+            if resolve_project_google_chat(name, config) is not None:
+                self.start_google_chat_subprocess(name)
         for team_name, team in config.teams.items():
             if not team.group_chat_id:
                 continue
