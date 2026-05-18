@@ -809,6 +809,132 @@ class GoogleChatTransport:
             )
 
     def render_markdown(self, text: str) -> str:
+        """Translate Telegram-flavored HTML and CommonMark markdown into
+        Google Chat's text format.
+
+        Google Chat supports:
+        - ``*bold*`` (single asterisks; ``**double**`` is literal)
+        - ``_italic_`` (single underscores)
+        - ``~strikethrough~`` (single tildes)
+        - ``` `inline code` ``` (single backticks)
+        - ``` ```fenced code``` ``` (triple backticks)
+        - ``<URL>`` autolink, ``<URL|displayed text>`` named link
+        - Bullet lists (``-`` or ``*`` at line start)
+
+        Google Chat does NOT support tables, headers, blockquotes, or
+        HTML tags. Those degrade to readable plain text. This function
+        is best-effort idempotent: content already in Google Chat
+        format passes through with minor formatting normalization.
+        """
+        import re as _re
+
+        # 1. Lift fenced code blocks out so subsequent regex passes
+        #    don't munge their contents. Handle Telegram HTML
+        #    ``<pre><code class="language-X">...</code></pre>`` and
+        #    plain ``<pre>...</pre>``.
+        code_blocks: list[str] = []
+
+        def _stash_block(lang: str, body: str) -> str:
+            # Unescape HTML entities inside the code block.
+            body = (
+                body.replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", '"')
+                .replace("&amp;", "&")
+            )
+            fence = f"```{lang}\n{body}\n```" if lang else f"```\n{body}\n```"
+            idx = len(code_blocks)
+            code_blocks.append(fence)
+            return f"\x00CB{idx}\x00"
+
+        text = _re.sub(
+            r'<pre><code class="language-(\w+)">(.+?)</code></pre>',
+            lambda m: _stash_block(m.group(1), m.group(2)),
+            text,
+            flags=_re.DOTALL,
+        )
+        text = _re.sub(
+            r"<pre>(.+?)</pre>",
+            lambda m: _stash_block("", m.group(1)),
+            text,
+            flags=_re.DOTALL,
+        )
+
+        # 2. Inline code: <code>...</code> → `...`
+        text = _re.sub(
+            r"<code>(.+?)</code>",
+            lambda m: "`"
+            + m.group(1)
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&amp;", "&")
+            + "`",
+            text,
+        )
+
+        # 3. Markdown headers → bold (Google Chat has no header syntax).
+        text = _re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=_re.MULTILINE)
+
+        # 4. Markdown tables → plain rows. Strip the divider row, keep
+        #    pipes as visual separators. Google Chat doesn't render
+        #    tables but the rows stay scannable.
+        def _flatten_table(m: _re.Match) -> str:
+            lines = m.group(0).strip().splitlines()
+            kept = [ln for ln in lines if not _re.fullmatch(r"\|[\s\-:|]+\|", ln.strip())]
+            # Trim leading/trailing pipes for readability.
+            return "\n".join(ln.strip().strip("|").strip() for ln in kept)
+
+        text = _re.sub(
+            r"(?:^\|.+\|[ \t]*\n){2,}",
+            _flatten_table,
+            text,
+            flags=_re.MULTILINE,
+        )
+
+        # 5. Telegram HTML bold/italic/strike → Google Chat marks.
+        text = _re.sub(r"<b>(.+?)</b>", r"*\1*", text, flags=_re.DOTALL)
+        text = _re.sub(r"<strong>(.+?)</strong>", r"*\1*", text, flags=_re.DOTALL)
+        text = _re.sub(r"<i>(.+?)</i>", r"_\1_", text, flags=_re.DOTALL)
+        text = _re.sub(r"<em>(.+?)</em>", r"_\1_", text, flags=_re.DOTALL)
+        text = _re.sub(r"<s>(.+?)</s>", r"~\1~", text, flags=_re.DOTALL)
+        text = _re.sub(r"<del>(.+?)</del>", r"~\1~", text, flags=_re.DOTALL)
+
+        # 6. Markdown bold/strike that may have leaked through
+        #    (non-html=True call sites).
+        text = _re.sub(r"\*\*(.+?)\*\*", r"*\1*", text, flags=_re.DOTALL)
+        text = _re.sub(r"__(.+?)__", r"*\1*", text, flags=_re.DOTALL)
+        text = _re.sub(r"~~(.+?)~~", r"~\1~", text, flags=_re.DOTALL)
+
+        # 7. Markdown links [text](url) → Google Chat <url|text>.
+        text = _re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
+        # Telegram HTML anchors → Google Chat <url|text>.
+        text = _re.sub(
+            r'<a\s+href="([^"]+)">(.+?)</a>',
+            r"<\1|\2>",
+            text,
+            flags=_re.DOTALL,
+        )
+
+        # 8. Blockquotes: Google Chat has no native support. Keep the
+        #    body, drop the tag — Telegram-shaped or markdown-shaped.
+        text = _re.sub(r"<blockquote>(.+?)</blockquote>", r"\1", text, flags=_re.DOTALL)
+        text = _re.sub(r"^&gt;\s?", "", text, flags=_re.MULTILINE)
+        text = _re.sub(r"^>\s?", "", text, flags=_re.MULTILINE)
+
+        # 9. Unescape any remaining HTML entities (md_to_telegram used
+        #    _escape_html on body text outside code blocks).
+        text = (
+            text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&amp;", "&")
+        )
+
+        # 10. Re-insert fenced code blocks.
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"\x00CB{i}\x00", block)
+
         return text
 
     def _extract_form_input(self, payload: dict, form_field: str) -> str:
@@ -840,7 +966,11 @@ class GoogleChatTransport:
         html: bool = False,
         reply_to: MessageRef | None = None,
     ) -> MessageRef:
-        rendered = self.render_markdown(text) if html else text
+        # Always run the renderer — Google Chat needs the conversion
+        # whether the caller passed Telegram HTML (html=True) or raw
+        # markdown (html=False). The renderer is idempotent for content
+        # already in Google Chat format.
+        rendered = self.render_markdown(text)
         self._check_message_bytes(rendered)
         request_id = self._new_request_id()
         body = {"text": rendered}
@@ -880,7 +1010,8 @@ class GoogleChatTransport:
         buttons=None,
         html: bool = False,
     ) -> None:
-        rendered = self.render_markdown(text) if html else text
+        # See send_text — render unconditionally for Google Chat parity.
+        rendered = self.render_markdown(text)
         self._check_message_bytes(rendered)
         if isinstance(msg.native, dict) and msg.native.get("is_app_created") is False:
             return
