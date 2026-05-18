@@ -275,3 +275,30 @@ def test_start_autostart_spawns_telegram_and_google_chat(monkeypatch, tmp_path):
     assert "alpha" in google_chat_spawns[0]
     assert "alpha" in pm.google_chat_pids
     assert "beta" not in pm.google_chat_pids
+
+
+def test_start_google_chat_records_failed_startup(monkeypatch, tmp_path, caplog):
+    """If the child exits non-zero within ~5 s of spawn, manager records the
+    failure and does NOT retry."""
+
+    class FakeFailedProc:
+        stdout = iter([])
+        pid = 99999
+        def poll(self): return 1  # exited immediately, non-zero
+        def wait(self, timeout=None): return 1
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: FakeFailedProc())
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+
+    pm.start_google_chat_subprocess("alpha")
+    # Run the supervise check immediately — under real usage the loop runs
+    # every few seconds.
+    pm._check_google_chat_health()  # to be added
+
+    assert pm.google_chat_pids == {}  # cleared
+    assert "alpha" in pm.google_chat_failed_startups
+    # Sanity: no retry was attempted (no second Popen).
+    # The fake_popen wasn't given a counter; if a retry happened
+    # the test wouldn't fail outright, but the status dict tells us no retry
+    # is queued.

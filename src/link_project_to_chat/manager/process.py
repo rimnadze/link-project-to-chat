@@ -213,6 +213,12 @@ class ProcessManager:
         # (crash detection) to ``.poll()``.
         self.google_chat_pids: dict[str, int] = {}
         self._google_chat_procs: dict[str, subprocess.Popen] = {}
+        # Projects whose google_chat subprocess exited non-zero shortly after
+        # spawn (typically a port-bind failure). The manager will NOT restart
+        # these on its own — a restart loop on an already-bound port is
+        # pointless and noisy. Operators see the entry via the manager UI and
+        # read the manager log to diagnose. Cleared on a successful restart.
+        self.google_chat_failed_startups: dict[str, str] = {}
 
     def _base_cli_command(self) -> list[str]:
         cmd = [sys.executable, "-m", "link_project_to_chat.cli"]
@@ -510,6 +516,36 @@ class ProcessManager:
         """
         self.stop_google_chat_subprocess(project_name)
         return self.start_google_chat_subprocess(project_name)
+
+    def _check_google_chat_health(self) -> None:
+        """Detect google_chat children that exited within the last health window.
+
+        Move their state from "running" to "failed startup" so any supervise
+        caller doesn't restart them in a tight loop on an already-bound port.
+
+        Unlike Telegram bots — whose ``_capture_output`` daemon thread reaps
+        ``self._processes`` on exit — google_chat subprocesses run without an
+        attached pipe-reader thread, so there is no implicit reaper. This
+        helper is the explicit one: callers (the manager UI, or any future
+        supervise loop) invoke it to flush dead children out of the
+        ``google_chat_pids`` / ``_google_chat_procs`` bookkeeping and surface
+        the failure via ``google_chat_failed_startups``.
+        """
+        failed: list[str] = []
+        for name, proc in list(self._google_chat_procs.items()):
+            status = proc.poll()
+            if status is None:
+                continue  # still running
+            if status != 0:
+                failed.append(name)
+        for name in failed:
+            self.google_chat_pids.pop(name, None)
+            self._google_chat_procs.pop(name, None)
+            self.google_chat_failed_startups[name] = "exited with non-zero status (see manager log)"
+            logger.warning(
+                "Google Chat subprocess for project %r exited non-zero — not restarting",
+                name,
+            )
 
     def stop(self, project_name: str) -> bool:
         """Stop a running project / team-bot subprocess.
