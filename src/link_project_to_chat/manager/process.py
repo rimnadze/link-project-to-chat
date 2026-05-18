@@ -217,7 +217,9 @@ class ProcessManager:
         # spawn (typically a port-bind failure). The manager will NOT restart
         # these on its own — a restart loop on an already-bound port is
         # pointless and noisy. Operators see the entry via the manager UI and
-        # read the manager log to diagnose. Cleared on a successful restart.
+        # read the manager log to diagnose. Cleared when
+        # start_google_chat_subprocess is called again for the same project
+        # (operator retry path).
         self.google_chat_failed_startups: dict[str, str] = {}
 
     def _base_cli_command(self) -> list[str]:
@@ -467,6 +469,8 @@ class ProcessManager:
                 project_name, self.google_chat_pids[project_name],
             )
             return False
+        # Clear any prior failure marker — operator is retrying.
+        self.google_chat_failed_startups.pop(project_name, None)
         config = load_config(self._project_config_path) if self._project_config_path else load_config()
         resolved = resolve_project_google_chat(project_name, config)
         if resolved is None:
@@ -518,34 +522,38 @@ class ProcessManager:
         return self.start_google_chat_subprocess(project_name)
 
     def _check_google_chat_health(self) -> None:
-        """Detect google_chat children that exited within the last health window.
+        """Detect google_chat children that exited.
 
-        Move their state from "running" to "failed startup" so any supervise
-        caller doesn't restart them in a tight loop on an already-bound port.
+        Walks self._google_chat_procs, calls .poll(), and reaps any child whose
+        process has exited. Non-zero exits are also recorded in
+        self.google_chat_failed_startups so the manager UI can show the operator
+        why the bot stopped.
 
-        Unlike Telegram bots — whose ``_capture_output`` daemon thread reaps
-        ``self._processes`` on exit — google_chat subprocesses run without an
-        attached pipe-reader thread, so there is no implicit reaper. This
-        helper is the explicit one: callers (the manager UI, or any future
-        supervise loop) invoke it to flush dead children out of the
-        ``google_chat_pids`` / ``_google_chat_procs`` bookkeeping and surface
-        the failure via ``google_chat_failed_startups``.
+        Callers (the manager UI, Task 14's smoke test, or any future supervise
+        loop) should invoke this on every supervise tick or every UI status read.
         """
-        failed: list[str] = []
+        reaped: list[tuple[str, int]] = []
         for name, proc in list(self._google_chat_procs.items()):
             status = proc.poll()
             if status is None:
                 continue  # still running
-            if status != 0:
-                failed.append(name)
-        for name in failed:
+            reaped.append((name, status))
+        for name, status in reaped:
             self.google_chat_pids.pop(name, None)
             self._google_chat_procs.pop(name, None)
-            self.google_chat_failed_startups[name] = "exited with non-zero status (see manager log)"
-            logger.warning(
-                "Google Chat subprocess for project %r exited non-zero — not restarting",
-                name,
-            )
+            if status != 0:
+                self.google_chat_failed_startups[name] = (
+                    f"exited with status {status} (see manager log)"
+                )
+                logger.warning(
+                    "%s google_chat subprocess exited with code %d — not restarting",
+                    name, status,
+                )
+            else:
+                logger.info(
+                    "%s google_chat subprocess exited cleanly",
+                    name,
+                )
 
     def stop(self, project_name: str) -> bool:
         """Stop a running project / team-bot subprocess.

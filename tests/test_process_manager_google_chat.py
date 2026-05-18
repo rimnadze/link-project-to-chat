@@ -302,3 +302,74 @@ def test_start_google_chat_records_failed_startup(monkeypatch, tmp_path, caplog)
     # The fake_popen wasn't given a counter; if a retry happened
     # the test wouldn't fail outright, but the status dict tells us no retry
     # is queued.
+
+
+def test_check_google_chat_health_reaps_clean_exit_without_recording_failure(
+    monkeypatch, tmp_path
+):
+    """A child that exits with status 0 should be cleaned up from both dicts
+    but NOT recorded as failed."""
+
+    class FakeCleanExitProc:
+        stdout = iter([])
+        pid = 88888
+        def poll(self): return 0  # clean exit
+        def wait(self, timeout=None): return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: FakeCleanExitProc())
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+
+    pm.start_google_chat_subprocess("alpha")
+    pm._check_google_chat_health()
+
+    assert pm.google_chat_pids == {}  # cleared
+    assert "alpha" not in pm.google_chat_failed_startups  # NOT marked as failed
+
+
+def test_check_google_chat_health_leaves_running_child_alone(monkeypatch, tmp_path):
+    """A child that's still alive must stay in the dicts."""
+
+    class FakeRunningProc:
+        stdout = iter([])
+        pid = 12345
+        def poll(self): return None  # still running
+        def wait(self, timeout=None): return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: FakeRunningProc())
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+    pm.start_google_chat_subprocess("alpha")
+
+    pm._check_google_chat_health()
+
+    assert "alpha" in pm.google_chat_pids
+    assert pm.google_chat_failed_startups == {}
+
+
+def test_failed_startup_clears_on_operator_retry(monkeypatch, tmp_path):
+    """Operator retries a failed bot: the failure marker should clear."""
+
+    proc_returns = iter([1, None])  # first exits non-zero, second stays running
+
+    def fake_popen(*a, **kw):
+        class FakeProc:
+            stdout = iter([])
+            pid = 90000
+            def poll(self): return next(proc_returns)
+            def wait(self, timeout=None): return 0
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    cfg_path = _write_config(tmp_path, with_google_chat=True)
+    pm = ProcessManager(project_config_path=cfg_path)
+
+    # First start fails.
+    pm.start_google_chat_subprocess("alpha")
+    pm._check_google_chat_health()
+    assert "alpha" in pm.google_chat_failed_startups
+
+    # Operator fixes the port and retries — the failure marker must clear.
+    pm.start_google_chat_subprocess("alpha")
+    assert "alpha" not in pm.google_chat_failed_startups
+    assert "alpha" in pm.google_chat_pids
