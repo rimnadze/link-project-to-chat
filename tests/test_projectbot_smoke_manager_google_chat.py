@@ -89,6 +89,7 @@ def _write_fake_service_account(path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_manager_starts_google_chat_and_dispatches_synthetic_event(
     tmp_path, monkeypatch,
 ):
