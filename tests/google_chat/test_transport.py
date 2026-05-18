@@ -1113,3 +1113,143 @@ async def test_self_identity_not_learned_when_multiple_bots_mentioned():
     await transport.dispatch_event(payload)
 
     assert transport.self_identity.native_id == "google_chat:app"  # unchanged
+
+
+# ──────────────────────────────────────────────────────────────────────
+# render_markdown: HTML + markdown → Google Chat text format
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _bare_transport() -> GoogleChatTransport:
+    return GoogleChatTransport(
+        config=GoogleChatConfig(
+            service_account_file="/tmp/key.json",
+            allowed_audiences=["https://x.test/google-chat/events"],
+        ),
+    )
+
+
+def test_render_markdown_telegram_html_bold_to_single_asterisk():
+    transport = _bare_transport()
+    assert transport.render_markdown("<b>important</b>") == "*important*"
+    assert transport.render_markdown("<strong>important</strong>") == "*important*"
+
+
+def test_render_markdown_double_asterisk_bold_to_single_asterisk():
+    """**bold** → *bold* (Google Chat uses single asterisks)."""
+    transport = _bare_transport()
+    assert transport.render_markdown("**bold**") == "*bold*"
+
+
+def test_render_markdown_italic_html_and_markdown():
+    transport = _bare_transport()
+    assert transport.render_markdown("<i>quiet</i>") == "_quiet_"
+    assert transport.render_markdown("<em>quiet</em>") == "_quiet_"
+    # Markdown `_x_` is already Google Chat italic — passes through.
+    assert transport.render_markdown("_quiet_") == "_quiet_"
+
+
+def test_render_markdown_strikethrough_html_and_markdown():
+    transport = _bare_transport()
+    assert transport.render_markdown("<s>gone</s>") == "~gone~"
+    assert transport.render_markdown("<del>gone</del>") == "~gone~"
+    assert transport.render_markdown("~~gone~~") == "~gone~"
+
+
+def test_render_markdown_inline_code():
+    transport = _bare_transport()
+    assert transport.render_markdown("<code>fn()</code>") == "`fn()`"
+    # Markdown backticks pass through.
+    assert transport.render_markdown("`fn()`") == "`fn()`"
+
+
+def test_render_markdown_code_block_with_language():
+    transport = _bare_transport()
+    out = transport.render_markdown(
+        '<pre><code class="language-python">x = 1\ny = 2</code></pre>'
+    )
+    assert out == "```python\nx = 1\ny = 2\n```"
+
+
+def test_render_markdown_code_block_plain_pre():
+    transport = _bare_transport()
+    out = transport.render_markdown("<pre>raw\nbody</pre>")
+    assert out == "```\nraw\nbody\n```"
+
+
+def test_render_markdown_unescapes_entities_inside_code_block():
+    transport = _bare_transport()
+    out = transport.render_markdown("<pre>if x &lt; y &amp;&amp; y &gt; z:</pre>")
+    assert "<" in out and ">" in out and "&&" in out
+    assert "&lt;" not in out and "&gt;" not in out and "&amp;" not in out
+
+
+def test_render_markdown_code_block_isolates_inner_asterisks():
+    """Asterisks inside fenced code must NOT trigger bold conversion."""
+    transport = _bare_transport()
+    src = "<pre><code class=\"language-python\">x = '**not bold**'</code></pre>"
+    out = transport.render_markdown(src)
+    assert out == "```python\nx = '**not bold**'\n```"
+
+
+def test_render_markdown_headers_to_bold():
+    transport = _bare_transport()
+    assert transport.render_markdown("# H1") == "*H1*"
+    assert transport.render_markdown("## H2") == "*H2*"
+    assert transport.render_markdown("### H3") == "*H3*"
+
+
+def test_render_markdown_link_markdown_to_angle_form():
+    transport = _bare_transport()
+    out = transport.render_markdown("see [docs](https://example.com/d)")
+    assert out == "see <https://example.com/d|docs>"
+
+
+def test_render_markdown_link_html_anchor_to_angle_form():
+    transport = _bare_transport()
+    out = transport.render_markdown('see <a href="https://example.com/d">docs</a>')
+    assert out == "see <https://example.com/d|docs>"
+
+
+def test_render_markdown_table_drops_separator_row():
+    transport = _bare_transport()
+    src = "| Col A | Col B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n"
+    out = transport.render_markdown(src)
+    # Separator line is gone; rows kept with cell separators readable.
+    assert "---" not in out
+    assert "Col A" in out and "Col B" in out
+    assert "a1" in out and "b1" in out
+
+
+def test_render_markdown_blockquote_html_and_markdown():
+    transport = _bare_transport()
+    assert transport.render_markdown("<blockquote>quoted</blockquote>") == "quoted"
+    assert transport.render_markdown("> quoted") == "quoted"
+
+
+def test_render_markdown_is_idempotent_for_already_correct_text():
+    """Plain Google Chat text round-trips unchanged."""
+    transport = _bare_transport()
+    src = "*bold* and _italic_ and ~strike~ and `code`"
+    assert transport.render_markdown(src) == src
+
+
+def test_render_markdown_combined_realistic_payload():
+    """Mirror the regression case from the issue screenshot."""
+    transport = _bare_transport()
+    src = (
+        "**How the parsing works**\n"
+        "| Telegram syntax | Google Chat syntax |\n"
+        "|---|---|\n"
+        "| /run npm test | /lp2c run npm test |\n"
+        "Use `/lp2c help` to list subcommands."
+    )
+    out = transport.render_markdown(src)
+    # Bold normalized.
+    assert "*How the parsing works*" in out
+    # Table divider stripped.
+    assert "---" not in out
+    # Inline code preserved.
+    assert "`/lp2c help`" in out
+    # No leftover double-asterisks.
+    assert "**" not in out
