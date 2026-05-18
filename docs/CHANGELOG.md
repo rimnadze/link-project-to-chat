@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.2.0 — 2026-05-17
+## 1.3.0 — 2026-05-17
 
 ### Google Chat manager integration
 
