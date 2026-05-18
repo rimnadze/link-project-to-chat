@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.0 — 2026-05-17
+
+### Google Chat manager integration
+
+- Per-project `google_chat` override on `ProjectConfig`; per-field merge over
+  the top-level operational-defaults block.
+- `ProcessManager` spawns, stops, and restarts google_chat subprocesses
+  alongside Telegram bots, keyed by `(project, transport)`.
+- Manager Telegram UI gains `[Add Google Chat]` / `[Edit Google Chat]` /
+  `[Remove Google Chat]` / `[Restart Google Chat]` buttons in the per-project
+  view. Wizard collects SA path, port, public URL, slash-command ID; prints
+  ready-to-paste nginx vhost on completion.
+- One-shot migration on first load auto-claims the top-level block for
+  single-project deployments. Multi-project no-override deployments are left
+  alone for the operator to claim via the wizard.
+- `rebuild.sh` now restarts every google_chat subprocess automatically.
+  No more per-bot `link-project-to-chat-gchat-*.service` units.
+
 ## Unreleased
 
 ### Fixed (Google Chat transport)
