@@ -1579,10 +1579,19 @@ class ManagerBot(AuthMixin):
         )
 
     async def _gchat_step_public_url(self, wizard: dict, chat, text: str) -> None:
-        if not text.startswith("https://"):
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(text)
+        except ValueError:
             await self._transport.send_text(
                 chat,
-                "URL must start with https:// (Google Chat refuses plain http). Enter again:",
+                "URL is malformed. Send a valid https://... URL:",
+            )
+            return
+        if parsed.scheme != "https" or not parsed.hostname:
+            await self._transport.send_text(
+                chat,
+                "URL must start with https:// and include a hostname — try again:",
             )
             return
         wizard["data"]["public_url"] = text
@@ -1601,6 +1610,11 @@ class ManagerBot(AuthMixin):
         except ValueError:
             await self._transport.send_text(
                 chat, "Invalid. Enter a numeric slash-command ID:",
+            )
+            return
+        if cmd_id < 1:
+            await self._transport.send_text(
+                chat, "Command ID must be a positive integer:",
             )
             return
         wizard["data"]["root_command_id"] = cmd_id

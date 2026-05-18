@@ -395,6 +395,127 @@ async def test_add_google_chat_wizard_rejects_non_https_url(tmp_path):
     assert "https" in fake.sent_messages[-1].text.lower()
 
 
+async def _arm_wizard_through_url(bot, state):
+    """Drive the wizard from button-tap through the URL step so callers can
+    exercise the command-id step in isolation.
+
+    Assumes ``bot._transport`` is already a ``FakeTransport`` and the project
+    'alpha' exists in the loaded config. Returns when the wizard step is
+    ``root_command_id``.
+    """
+    from unittest.mock import MagicMock as _MM
+
+    click, _ = _make_wizard_click("proj_add_gchat_alpha", user_data=state)
+    await bot._dispatch_button_click(click)
+
+    for text in (
+        "/home/botuser/keys/alpha.json",
+        "8091",
+        "https://alpha.example.com",
+    ):
+        update = _make_text_update(text)
+        ctx = _MM()
+        ctx.user_data = state
+        await bot._edit_field_save(update, ctx)
+
+
+@pytest.mark.asyncio
+async def test_add_google_chat_wizard_rejects_url_without_hostname(tmp_path):
+    """`https://` with no hostname must not advance the wizard."""
+    cfg_path = _write_project_config(
+        tmp_path,
+        {"alpha": {"path": str(tmp_path), "telegram_bot_token": "tok"}},
+    )
+
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_add_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    from unittest.mock import MagicMock as _MM
+    # Advance to public_url step.
+    for text in ("/home/botuser/keys/alpha.json", "8091"):
+        update = _make_text_update(text)
+        ctx = _MM()
+        ctx.user_data = state
+        await bot._edit_field_save(update, ctx)
+    assert state["gchat_wizard"]["step"] == "public_url"
+
+    # Bare `https://` — no hostname.
+    update = _make_text_update("https://")
+    ctx = _MM()
+    ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+
+    assert state["gchat_wizard"]["step"] == "public_url"
+    last = fake.sent_messages[-1].text.lower()
+    assert "hostname" in last or "valid" in last
+
+
+@pytest.mark.asyncio
+async def test_add_google_chat_wizard_rejects_malformed_url(tmp_path):
+    """A URL that urlparse can't parse must not advance the wizard."""
+    cfg_path = _write_project_config(
+        tmp_path,
+        {"alpha": {"path": str(tmp_path), "telegram_bot_token": "tok"}},
+    )
+
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    click, state = _make_wizard_click("proj_add_gchat_alpha")
+    await bot._dispatch_button_click(click)
+
+    from unittest.mock import MagicMock as _MM
+    for text in ("/home/botuser/keys/alpha.json", "8091"):
+        update = _make_text_update(text)
+        ctx = _MM()
+        ctx.user_data = state
+        await bot._edit_field_save(update, ctx)
+    assert state["gchat_wizard"]["step"] == "public_url"
+
+    # `https://[bad` triggers urlparse to raise ValueError (malformed IPv6
+    # brackets) — wizard must catch and stay on the step.
+    update = _make_text_update("https://[bad")
+    ctx = _MM()
+    ctx.user_data = state
+    await bot._edit_field_save(update, ctx)
+
+    assert state["gchat_wizard"]["step"] == "public_url"
+    last = fake.sent_messages[-1].text.lower()
+    assert "hostname" in last or "valid" in last or "malformed" in last
+
+
+@pytest.mark.asyncio
+async def test_add_google_chat_wizard_rejects_non_positive_command_id(tmp_path):
+    """Command ID 0 or negative must not advance the wizard."""
+    cfg_path = _write_project_config(
+        tmp_path,
+        {"alpha": {"path": str(tmp_path), "telegram_bot_token": "tok"}},
+    )
+
+    bot = _make_bot(cfg_path)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    state: dict = {}
+    await _arm_wizard_through_url(bot, state)
+    assert state["gchat_wizard"]["step"] == "root_command_id"
+
+    from unittest.mock import MagicMock as _MM
+    for bad in ("0", "-1"):
+        update = _make_text_update(bad)
+        ctx = _MM()
+        ctx.user_data = state
+        await bot._edit_field_save(update, ctx)
+        assert state["gchat_wizard"]["step"] == "root_command_id"
+        last = fake.sent_messages[-1].text.lower()
+        assert "positive" in last
+
+
 @pytest.mark.asyncio
 async def test_add_google_chat_wizard_viewer_cannot_start(tmp_path):
     """A viewer-role user must not be able to start the Add wizard."""
