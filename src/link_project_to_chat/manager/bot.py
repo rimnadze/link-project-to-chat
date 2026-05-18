@@ -2400,6 +2400,24 @@ class ManagerBot(AuthMixin):
 
         value = click.value
 
+        # Task 11 added the proj_<verb>_gchat_<name> callbacks for the new
+        # Google Chat per-project buttons. Tasks 12-13 will land the real
+        # wizard handlers. Until then, catch the whole prefix family up front
+        # so that e.g. "proj_edit_gchat_alpha" doesn't fall through to the
+        # generic ``proj_edit_`` branch below and silently misroute to the
+        # regular edit flow with project name ``gchat_alpha``.
+        if (
+            value.startswith("proj_add_gchat_")
+            or value.startswith("proj_edit_gchat_")
+            or value.startswith("proj_restart_gchat_")
+            or value.startswith("proj_remove_gchat_")
+        ):
+            await self._transport.edit_text(
+                click.message,
+                "Google Chat management coming in Task 12-13.",
+            )
+            return
+
         if value.startswith("proj_info_"):
             name = value[len("proj_info_"):]
             status = self._pm.status(name)
