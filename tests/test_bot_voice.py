@@ -346,3 +346,94 @@ async def test_voice_long_transcript_truncated_in_status(tmp_path):
     for t in truncated_edits:
         # "🎤 "text..."" format: the inner text portion should be 200 chars max
         assert len(t) < 300  # 200 chars + wrapper/ellipsis
+
+
+async def test_finalize_voice_task_skips_synthesizer_on_google_chat(monkeypatch):
+    """Outbound TTS upload is unavailable on google_chat with default chat.bot
+    auth, so the synthesizer path must be skipped — the operator should get
+    a plain text reply instead of a '[file upload not available]' fallback."""
+    from link_project_to_chat.bot import ProjectBot
+    from link_project_to_chat.task_manager import Task, TaskStatus, TaskType
+
+    bot = _make_project_bot_stub(with_synthesizer=True)
+    bot._transport.TRANSPORT_ID = "google_chat"  # mock the channel
+
+    # Minimal _finalize_claude_task scaffolding.
+    bot._live_text = {}
+    bot._live_thinking = {}
+    bot._live_text_failed = set()
+    bot._live_thinking_failed = set()
+    bot._thinking_buf = {}
+    bot._thinking_store = {}
+
+    voice_response_calls: list[tuple] = []
+
+    async def _spy_send_voice_response(chat, text, reply_to):
+        voice_response_calls.append((chat, text, reply_to))
+
+    text_send_calls: list[tuple] = []
+
+    async def _spy_send_to_chat(chat, text, reply_to=None):
+        text_send_calls.append((chat, text, reply_to))
+
+    monkeypatch.setattr(bot, "_send_voice_response", _spy_send_voice_response)
+    monkeypatch.setattr(bot, "_send_to_chat", _spy_send_to_chat)
+
+    chat = ChatRef(transport_id="google_chat", native_id="spaces/AAAA", kind=ChatKind.DM)
+    msg = MessageRef(transport_id="google_chat", native_id="m1", chat=chat)
+    task = Task(
+        id=42, chat=chat, message=msg, type=TaskType.AGENT, input="hi", name="agent",
+        status=TaskStatus.DONE, result="Hello back.",
+    )
+    bot._voice_tasks.add(task.id)
+
+    await ProjectBot._finalize_claude_task(bot, task)
+
+    assert voice_response_calls == [], (
+        f"_send_voice_response must not be called on google_chat; got {voice_response_calls!r}"
+    )
+    assert any(call[1] == "Hello back." for call in text_send_calls), (
+        f"expected plain text reply, got {text_send_calls!r}"
+    )
+
+
+async def test_finalize_voice_task_still_synthesizes_on_other_transports(monkeypatch):
+    """Sanity: the google_chat gate doesn't accidentally suppress TTS on
+    transports that DO support voice upload (Telegram, Fake)."""
+    from link_project_to_chat.bot import ProjectBot
+    from link_project_to_chat.task_manager import Task, TaskStatus, TaskType
+
+    bot = _make_project_bot_stub(with_synthesizer=True)
+    # FakeTransport.TRANSPORT_ID is already "fake" — leave it alone.
+
+    bot._live_text = {}
+    bot._live_thinking = {}
+    bot._live_text_failed = set()
+    bot._live_thinking_failed = set()
+    bot._thinking_buf = {}
+    bot._thinking_store = {}
+
+    voice_response_calls: list[tuple] = []
+
+    async def _spy_send_voice_response(chat, text, reply_to):
+        voice_response_calls.append((chat, text, reply_to))
+
+    async def _spy_send_to_chat(chat, text, reply_to=None):
+        pass
+
+    monkeypatch.setattr(bot, "_send_voice_response", _spy_send_voice_response)
+    monkeypatch.setattr(bot, "_send_to_chat", _spy_send_to_chat)
+
+    chat = ChatRef(transport_id="fake", native_id="42", kind=ChatKind.DM)
+    msg = MessageRef(transport_id="fake", native_id="m1", chat=chat)
+    task = Task(
+        id=43, chat=chat, message=msg, type=TaskType.AGENT, input="hi", name="agent",
+        status=TaskStatus.DONE, result="Hello back.",
+    )
+    bot._voice_tasks.add(task.id)
+
+    await ProjectBot._finalize_claude_task(bot, task)
+
+    assert len(voice_response_calls) == 1, (
+        f"expected _send_voice_response on non-google_chat transport, got {voice_response_calls!r}"
+    )

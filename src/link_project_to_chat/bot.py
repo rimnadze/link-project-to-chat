@@ -750,7 +750,16 @@ class ProjectBot(AuthMixin):
                 await live_thinking.finalize(render=False)
             elif thinking:
                 self._thinking_store[task.id] = thinking
-            if is_voice and self._synthesizer and task.result:
+            if (
+                is_voice
+                and self._synthesizer
+                and task.result
+                and self._transport.TRANSPORT_ID != "google_chat"
+            ):
+                # Google Chat's REST media.upload requires user-OAuth scopes;
+                # the default chat.bot service-account auth 403s. Skip the
+                # TTS round-trip so the operator gets a clean text reply
+                # instead of "[Google Chat file upload is not available]".
                 await self._send_voice_response(task.chat, task.result, reply_to=task.message)
             return assistant_text
         else:
