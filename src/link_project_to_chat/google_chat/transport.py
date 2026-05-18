@@ -533,6 +533,23 @@ class GoogleChatTransport:
             }
         if "appCommandPayload" in chat:
             ap = chat.get("appCommandPayload") or {}
+            # [TRACE-v3] Dump appCommandPayload contents so we can identify
+            # whether button clicks are routed through here (with a marker
+            # like appCommandMetadata.dialogEventType or formInputs) or via
+            # a different key entirely. Strip with the v1/v2 diagnostics.
+            import json as _json
+            try:
+                ap_json = _json.dumps(ap, default=str)[:4000]
+            except Exception as _exc:  # noqa: BLE001
+                ap_json = f"<unserializable: {_exc}>"
+            logger.warning(
+                "[TRACE-v3] appCommandPayload contents (truncated 4KB): %s",
+                ap_json,
+            )
+            logger.warning(
+                "[TRACE-v3] commonEventObject contents (truncated 4KB): %s",
+                _json.dumps(payload.get("commonEventObject") or {}, default=str)[:4000],
+            )
             return {
                 "type": "APP_COMMAND",
                 "eventTime": ap.get("eventTime") or common_time,
