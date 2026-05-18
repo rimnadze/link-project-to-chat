@@ -10,6 +10,8 @@
 
 **Prerequisite:** Plan `2026-04-21-web-transport.md` must be complete (all shared primitives in `transport/base.py`, `config.py`, `group_filters.py`, and `FakeTransport` extended).
 
+**Scope:** v1.0 — transport-only. Per-project override schema lands in this plan (Task 1) so the v1.1 manager-integration plan can layer wizard + ProcessManager on top without re-opening config. The full manager-wizard + `ProcessManager.start_slack_subprocess` + autostart wiring is **deferred to v1.1** under a separate plan: [`2026-05-18-slack-manager-integration.md`](2026-05-18-slack-manager-integration.md). The v1.0 plan stops at "SlackTransport satisfies the parametrized contract test." v1.1 turns it into a first-class manager-supervised feature mirroring the Google Chat v1.2 shipping arc.
+
 ---
 
 ## File Map
@@ -18,18 +20,40 @@
 |------|--------|
 | `src/link_project_to_chat/transport/slack.py` | **NEW**: `SlackTransport` full implementation |
 | `src/link_project_to_chat/transport/__init__.py` | Export `SlackTransport` |
+| `src/link_project_to_chat/slack/__init__.py` | **NEW**: namespace package for resolver/helpers (mirrors `google_chat/`) |
+| `src/link_project_to_chat/slack/resolver.py` | **NEW**: `resolve_project_slack` per-project merge helper (mirrors `google_chat/resolver.py`) |
+| `src/link_project_to_chat/config.py` | Add `SlackConfig`, `SlackProjectOverride`, parse/serialize helpers, `ProjectConfig.slack` field, `_maybe_migrate_top_level_slack` |
 | `pyproject.toml` | Add `slack` optional dep group: `slack-bolt>=1.18` |
 | `tests/transport/test_contract.py` | Add `SlackTransport` to `transport` fixture |
 | `tests/transport/test_slack_transport.py` | **NEW**: Slack-specific unit tests (modal submit, mention parsing, command parsing) |
+| `tests/slack/test_resolver.py` | **NEW**: unit tests for the per-project merge |
+| `tests/test_config.py` | Round-trip + migration tests for `SlackProjectOverride` |
 
 ---
 
-### Task 1: Add `slack_bolt` dependency, config surface, and `SlackTransport` skeleton
+### Task 1: Add `slack_bolt` dependency, transport skeleton, and `SlackProjectOverride` config schema
+
+This task lands four discrete sub-steps in this order so the v1.1 manager-integration plan can build directly on top without reopening config:
+
+1. Add the `slack_bolt` optional dependency and `SlackTransport` skeleton (existing scope).
+2. Add `SlackConfig` (top-level operational defaults) and `SlackProjectOverride` (per-project optionals) dataclasses, mirroring the Google Chat config layering.
+3. Add `_parse_slack_override` / `_serialize_slack_override` round-trip helpers + `_maybe_migrate_top_level_slack` one-shot migration.
+4. Add `resolve_project_slack` per-project merge resolver in a new `src/link_project_to_chat/slack/resolver.py` module.
+
+Reference-mirror prior art (every helper has a Google Chat twin already shipped on `dev`):
+- `# Mirror: src/link_project_to_chat/config.py GoogleChatProjectOverride pattern (lines ~372-407)`
+- `# Mirror: src/link_project_to_chat/google_chat/resolver.py resolve_project_google_chat`
+- `# Mirror: _maybe_migrate_top_level_google_chat in config.py (lines ~1065-1081)`
 
 **Files:**
 - Modify: `pyproject.toml`
+- Modify: `src/link_project_to_chat/config.py`
 - Create: `src/link_project_to_chat/transport/slack.py`
+- Create: `src/link_project_to_chat/slack/__init__.py`
+- Create: `src/link_project_to_chat/slack/resolver.py`
 - Create: `tests/transport/test_slack_transport.py` (initial skeleton)
+- Create: `tests/slack/test_resolver.py`
+- Modify: `tests/test_config.py`
 
 - [ ] **Step 1: Write the failing skeleton test**
 
@@ -46,6 +70,28 @@ def test_slack_transport_id():
     app = MagicMock()
     t = SlackTransport(app)
     assert t.TRANSPORT_ID == "slack"
+
+
+def test_mention_regex_matches_U_W_B_user_ids():
+    """Lesson from Google Chat v1.0: <@B...> bot mentions must be parsed too.
+
+    Slack stable IDs come in three flavors — U (regular user), W (Enterprise
+    Grid user), and B (bot user). A regex that only matches U... drops every
+    bot-to-bot @mention, breaking team-routing in mixed-bot channels.
+    """
+    from link_project_to_chat.transport.slack import _MENTION_RE
+
+    text = "<@U111> please ping <@W222|alice> and <@B333>"
+    matches = _MENTION_RE.findall(text)
+    assert matches == ["U111", "W222", "B333"]
+
+
+def test_channel_mention_regex_matches_C_ids():
+    from link_project_to_chat.transport.slack import _CHANNEL_MENTION_RE
+
+    text = "see <#C100|general> and <#C200>"
+    matches = _CHANNEL_MENTION_RE.findall(text)
+    assert matches == ["C100", "C200"]
 ```
 
 - [ ] **Step 2: Run to confirm failures**
@@ -76,7 +122,9 @@ pip install -e ".[slack]"
 Uses slack_bolt AsyncApp with Socket Mode so no public ingress is needed.
 /lp2c slash command maps to CommandInvocation. PromptSpec(TEXT/SECRET)
 opens Slack modal views; CHOICE/CONFIRM sends Block Kit actions sections.
-Mentions are parsed from <@U...> entities to populate IncomingMessage.mentions.
+Mentions are parsed from <@U...>, <@W...> (Enterprise Grid users), and
+<@B...> (bot user) entities to populate IncomingMessage.mentions; channel
+mentions (<#C...>) are parsed separately for the prompt-renderer.
 """
 from __future__ import annotations
 
@@ -106,8 +154,22 @@ from link_project_to_chat.transport.base import (
     TransportRetryAfter,
 )
 
-# Matches Slack mention tokens: <@U12345678> or <@U12345678|alice>
-_MENTION_RE = re.compile(r"<@(U[A-Z0-9]+)(?:\|[^>]*)?>")
+# Matches Slack mention tokens: <@U12345678>, <@W12345678|alice>, <@B12345678>.
+# Slack stable IDs come in three flavors:
+#   U... = regular workspace user
+#   W... = Slack-Enterprise-Grid user
+#   B... = bot user (peer bots, our own bot, and any third-party Slack apps)
+# Lesson from Google Chat v1.0: the inbound parser must accept B-prefixed IDs
+# so bot-to-bot @mentions (peer bots in the same channel) make it into
+# IncomingMessage.mentions and the team-routing layer can match BotPeerRef.
+_MENTION_RE = re.compile(r"<@([UWB][A-Z0-9]+)(?:\|[^>]*)?>")
+
+# Matches Slack channel mention tokens: <#C12345678> or <#C12345678|general>.
+# Populated separately from user mentions because Identity vs ChatRef are
+# different shapes and the team-routing layer doesn't care about channel
+# refs inside message text — but the linker / prompt-renderer does, so the
+# transport exposes both lists.
+_CHANNEL_MENTION_RE = re.compile(r"<#(C[A-Z0-9]+)(?:\|[^>]*)?>")
 
 
 def _parse_mentions(text: str, client: Any) -> list[Identity]:
@@ -120,9 +182,18 @@ def _parse_mentions(text: str, client: Any) -> list[Identity]:
             native_id=uid,
             display_name="",
             handle=None,
-            is_bot=False,  # unknown without API call; set best-effort
+            # is_bot can't be known from text alone; the dispatcher overrides
+            # this from event.bot_profile when normalizing IncomingMessage.
+            is_bot=uid.startswith("B"),
         ))
     return result
+
+
+def _parse_channel_mentions(text: str) -> list[str]:
+    """Extract channel IDs from <#C...> tokens. Returned bare (no ChatRef wrap)
+    because the contract test exercises plain ID extraction; callers that
+    need a ChatRef build it via ``_chat_ref_from_slack``."""
+    return _CHANNEL_MENTION_RE.findall(text)
 
 
 def _chat_ref_from_slack(channel_id: str, is_dm: bool) -> ChatRef:
@@ -218,15 +289,571 @@ class SlackTransport:
 - [ ] **Step 5: Run to confirm skeleton tests pass**
 
 ```
-pytest tests/transport/test_slack_transport.py::test_slack_transport_importable tests/transport/test_slack_transport.py::test_slack_transport_id -v
+pytest tests/transport/test_slack_transport.py -k "importable or transport_id or mention_regex or channel_mention" -v
 ```
-Expected: both PASS.
+Expected: all four PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit the transport skeleton**
 
 ```bash
 git add pyproject.toml src/link_project_to_chat/transport/slack.py tests/transport/test_slack_transport.py
-git commit -m "feat: add SlackTransport skeleton and slack-bolt dependency"
+git commit -m "feat: add SlackTransport skeleton, slack-bolt dep, and U/W/B mention regex"
+```
+
+#### Sub-step A — `SlackConfig` + `SlackProjectOverride` dataclasses
+
+- [ ] **Step 7: Write failing dataclass tests**
+
+Append to `tests/test_config.py`:
+
+```python
+def test_slack_config_defaults():
+    from link_project_to_chat.config import SlackConfig
+
+    cfg = SlackConfig()
+    assert cfg.bot_token == ""
+    assert cfg.app_token == ""
+    assert cfg.workspace_id == ""
+    assert cfg.default_channel_id == ""
+    assert cfg.socket_mode_enabled is True
+
+
+def test_slack_project_override_defaults_all_optional():
+    from link_project_to_chat.config import SlackProjectOverride
+
+    override = SlackProjectOverride()
+
+    # Every field defaults to None so a project can opt in field-by-field.
+    assert override.bot_token is None
+    assert override.app_token is None
+    assert override.workspace_id is None
+    assert override.default_channel_id is None
+    assert override.socket_mode_enabled is None
+
+
+def test_slack_project_override_validate_requires_a_token():
+    """A project-level override must carry at least one token; otherwise the
+    spawn would have nothing to authenticate with. Mirrors the
+    ``port``-is-required check on GoogleChatProjectOverride."""
+    from link_project_to_chat.config import ConfigError, SlackProjectOverride
+
+    with pytest.raises(ConfigError, match="token"):
+        SlackProjectOverride().validate()
+    # bot_token alone is fine (Socket Mode disabled / webhook delivery)
+    SlackProjectOverride(bot_token="xoxb-1").validate()
+    # app_token alone is fine (Socket Mode without an outbound bot token —
+    # operator may scope it via top-level fallback)
+    SlackProjectOverride(app_token="xapp-1").validate()
+
+
+def test_slack_project_override_validate_accepts_both_tokens():
+    from link_project_to_chat.config import SlackProjectOverride
+
+    SlackProjectOverride(bot_token="xoxb-1", app_token="xapp-1").validate()
+```
+
+- [ ] **Step 8: Verify RED**
+
+```
+PYTHONPATH=src python3 -m pytest tests/test_config.py -k "slack_config_defaults or slack_project_override" -q
+```
+Expected: 4 failed with `ImportError: cannot import name 'SlackConfig'`.
+
+- [ ] **Step 9: Add the dataclasses**
+
+In `src/link_project_to_chat/config.py`, immediately after the existing
+`GoogleChatProjectOverride` definition (around line 407), add:
+
+```python
+# Mirror: GoogleChatConfig (config.py:353) — top-level Slack operational
+# defaults. Every project shares Socket Mode + workspace defaults from this
+# block; per-project SlackProjectOverride fields win field-by-field.
+@dataclass
+class SlackConfig:
+    bot_token: str = ""
+    app_token: str = ""
+    workspace_id: str = ""
+    default_channel_id: str = ""
+    socket_mode_enabled: bool = True
+
+
+# Mirror: GoogleChatProjectOverride (config.py:372) — per-project override
+# layered on top of SlackConfig. Every field is Optional so a project only
+# needs to set the fields that differ from the operational-defaults block.
+# At least one of bot_token / app_token is required at validate() time —
+# Slack needs *something* to authenticate the spawn.
+@dataclass
+class SlackProjectOverride:
+    bot_token: str | None = None
+    app_token: str | None = None
+    workspace_id: str | None = None
+    default_channel_id: str | None = None
+    socket_mode_enabled: bool | None = None
+
+    def validate(self) -> None:
+        if not self.bot_token and not self.app_token:
+            raise ConfigError(
+                "slack per-project override requires at least one of "
+                "'bot_token' or 'app_token'"
+            )
+```
+
+- [ ] **Step 10: Verify GREEN**
+
+```
+PYTHONPATH=src python3 -m pytest tests/test_config.py -k "slack_config_defaults or slack_project_override" -q
+```
+Expected: 4 passed.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/link_project_to_chat/config.py tests/test_config.py
+git commit -m "feat(config): add SlackConfig + SlackProjectOverride dataclasses"
+```
+
+#### Sub-step B — Parse/serialize helpers + `ProjectConfig.slack` field + migration
+
+- [ ] **Step 12: Write failing round-trip + migration tests**
+
+Append to `tests/test_config.py`:
+
+```python
+def test_parse_slack_override_minimal():
+    from link_project_to_chat.config import _parse_slack_override
+
+    override = _parse_slack_override({"bot_token": "xoxb-1"})
+    assert override.bot_token == "xoxb-1"
+    assert override.app_token is None
+
+
+def test_parse_slack_override_full():
+    from link_project_to_chat.config import _parse_slack_override
+
+    raw = {
+        "bot_token": "xoxb-1",
+        "app_token": "xapp-1",
+        "workspace_id": "T012",
+        "default_channel_id": "C100",
+        "socket_mode_enabled": False,
+    }
+    override = _parse_slack_override(raw)
+    assert override.bot_token == "xoxb-1"
+    assert override.app_token == "xapp-1"
+    assert override.workspace_id == "T012"
+    assert override.default_channel_id == "C100"
+    assert override.socket_mode_enabled is False
+
+
+def test_parse_slack_override_no_tokens_raises():
+    from link_project_to_chat.config import ConfigError, _parse_slack_override
+
+    with pytest.raises(ConfigError, match="token"):
+        _parse_slack_override({"workspace_id": "T012"})
+
+
+def test_serialize_slack_override_omits_none_fields():
+    from link_project_to_chat.config import (
+        SlackProjectOverride,
+        _serialize_slack_override,
+    )
+
+    raw = _serialize_slack_override(SlackProjectOverride(bot_token="xoxb-1"))
+    assert raw == {"bot_token": "xoxb-1"}
+    assert "app_token" not in raw
+
+
+def test_project_config_round_trips_slack_override(tmp_path):
+    import json
+    from link_project_to_chat.config import (
+        SlackProjectOverride,
+        load_config,
+        save_config,
+    )
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "alpha": {
+                "path": "/p",
+                "telegram_bot_token": "",
+                "slack": {
+                    "bot_token": "xoxb-1",
+                    "app_token": "xapp-1",
+                    "workspace_id": "T012",
+                },
+            }
+        }
+    }))
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["alpha"].slack == SlackProjectOverride(
+        bot_token="xoxb-1",
+        app_token="xapp-1",
+        workspace_id="T012",
+    )
+
+    save_config(loaded, cfg_path)
+    raw = json.loads(cfg_path.read_text())
+    assert raw["projects"]["alpha"]["slack"] == {
+        "bot_token": "xoxb-1",
+        "app_token": "xapp-1",
+        "workspace_id": "T012",
+    }
+
+
+def test_slack_migration_auto_claims_for_single_project(tmp_path):
+    """Mirrors _maybe_migrate_top_level_google_chat: when exactly one
+    project exists and has no slack override but the top-level slack block
+    is meaningful (a bot_token is set), synthesize an override."""
+    import json
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {"solo": {"path": "/p", "telegram_bot_token": ""}},
+        "slack": {"bot_token": "xoxb-shared", "app_token": "xapp-shared"},
+    }))
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["solo"].slack is not None
+    assert loaded.projects["solo"].slack.bot_token == "xoxb-shared"
+
+
+def test_slack_migration_skips_when_multiple_projects(tmp_path):
+    """Ambiguous: don't guess which project gets the shared token."""
+    import json
+    from link_project_to_chat.config import load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "projects": {
+            "a": {"path": "/a", "telegram_bot_token": ""},
+            "b": {"path": "/b", "telegram_bot_token": ""},
+        },
+        "slack": {"bot_token": "xoxb-shared"},
+    }))
+
+    loaded = load_config(cfg_path)
+    assert loaded.projects["a"].slack is None
+    assert loaded.projects["b"].slack is None
+    # Top-level kept for the operator to claim via the v1.1 wizard.
+    assert loaded.slack.bot_token == "xoxb-shared"
+```
+
+- [ ] **Step 13: Verify RED**
+
+```
+PYTHONPATH=src python3 -m pytest tests/test_config.py -k "parse_slack or serialize_slack or project_config_round_trips_slack or slack_migration" -q
+```
+Expected: 7 failed.
+
+- [ ] **Step 14: Add parse/serialize helpers, `ProjectConfig.slack` field, migration**
+
+In `src/link_project_to_chat/config.py`:
+
+1. Add `slack` to `Config`:
+
+```python
+@dataclass
+class Config:
+    # ... existing fields ...
+    slack: SlackConfig = field(default_factory=SlackConfig)
+```
+
+   …and wire its parse/serialize in `load_config` / `save_config` alongside
+   `google_chat` (search for `_parse_google_chat(raw.get("google_chat", ...))`
+   and add a sibling call to a new `_parse_slack(...)` helper that returns
+   `SlackConfig(**raw)` with type-checked fields).
+
+2. Add the per-project field on `ProjectConfig` (immediately after the new
+   `google_chat: "GoogleChatProjectOverride | None" = None`):
+
+```python
+slack: "SlackProjectOverride | None" = None
+```
+
+3. Add the parse/serialize helpers (near `_parse_google_chat_override` /
+   `_serialize_google_chat_override`, around line 980):
+
+```python
+def _parse_slack_override(raw: dict) -> "SlackProjectOverride":
+    # Mirror: _parse_google_chat_override (config.py:979).
+    def _opt_str(key: str) -> str | None:
+        value = raw.get(key)
+        return str(value) if isinstance(value, str) else None
+
+    def _opt_bool(key: str) -> bool | None:
+        value = raw.get(key)
+        return bool(value) if isinstance(value, bool) else None
+
+    override = SlackProjectOverride(
+        bot_token=_opt_str("bot_token"),
+        app_token=_opt_str("app_token"),
+        workspace_id=_opt_str("workspace_id"),
+        default_channel_id=_opt_str("default_channel_id"),
+        socket_mode_enabled=_opt_bool("socket_mode_enabled"),
+    )
+    override.validate()
+    return override
+
+
+def _serialize_slack_override(override: "SlackProjectOverride") -> dict:
+    # Mirror: _serialize_google_chat_override (config.py:1027).
+    raw: dict[str, object] = {}
+    for field_name in (
+        "bot_token",
+        "app_token",
+        "workspace_id",
+        "default_channel_id",
+        "socket_mode_enabled",
+    ):
+        value = getattr(override, field_name)
+        if value is not None:
+            raw[field_name] = value
+    return raw
+
+
+def _slack_top_is_meaningful(top: "SlackConfig") -> bool:
+    """True when the top-level slack block has at least one token set.
+    Mirror: _google_chat_top_is_meaningful (config.py:1055)."""
+    return bool(top.bot_token or top.app_token)
+
+
+def _maybe_migrate_top_level_slack(cfg: "Config") -> None:
+    """One-shot: when exactly one project exists and has no slack override
+    but the top-level slack block carries a token, synthesize an override.
+    No-op when zero, multiple, or already-overridden projects exist.
+    Mirror: _maybe_migrate_top_level_google_chat (config.py:1065)."""
+    top = cfg.slack
+    if not _slack_top_is_meaningful(top):
+        return
+    projects_without_override = [
+        name for name, pc in cfg.projects.items() if pc.slack is None
+    ]
+    if len(cfg.projects) != 1 or len(projects_without_override) != 1:
+        return
+    sole_name = projects_without_override[0]
+    cfg.projects[sole_name].slack = SlackProjectOverride(
+        bot_token=top.bot_token or None,
+        app_token=top.app_token or None,
+        workspace_id=top.workspace_id or None,
+    )
+```
+
+4. Wire the override into project parse + serialize (mirror the
+   `google_chat` branch in the same functions):
+
+```python
+raw_slack = raw.get("slack")
+slack = _parse_slack_override(raw_slack) if isinstance(raw_slack, dict) else None
+```
+
+   …pass `slack=slack` to the `ProjectConfig(...)` constructor.
+
+   For serialize:
+
+```python
+if project.slack is not None:
+    proj["slack"] = _serialize_slack_override(project.slack)
+```
+
+5. Call the migration in `load_config` immediately after
+   `_maybe_migrate_top_level_google_chat(config)`:
+
+```python
+_maybe_migrate_top_level_slack(config)
+```
+
+- [ ] **Step 15: Verify GREEN**
+
+```
+PYTHONPATH=src python3 -m pytest tests/test_config.py -k "slack" -q
+```
+Expected: all slack-related config tests PASS (11 total: 4 dataclass + 7 round-trip/migration).
+
+- [ ] **Step 16: Commit**
+
+```bash
+git add src/link_project_to_chat/config.py tests/test_config.py
+git commit -m "feat(config): parse/serialize SlackProjectOverride + one-shot migration"
+```
+
+#### Sub-step C — `resolve_project_slack` per-field merge resolver
+
+- [ ] **Step 17: Write failing resolver tests**
+
+Create `tests/slack/__init__.py` (empty) and `tests/slack/test_resolver.py`:
+
+```python
+"""Per-field merge tests for resolve_project_slack.
+
+Mirror: tests/google_chat/test_resolver.py — same five scenarios,
+re-typed for Slack tokens instead of Google Chat ports/SA files.
+"""
+from __future__ import annotations
+
+import pytest
+
+from link_project_to_chat.config import (
+    Config,
+    ProjectConfig,
+    SlackConfig,
+    SlackProjectOverride,
+)
+from link_project_to_chat.slack.resolver import resolve_project_slack
+
+
+def _config(top_level: SlackConfig | None, projects: dict[str, ProjectConfig]) -> Config:
+    return Config(
+        projects=projects,
+        slack=top_level if top_level is not None else SlackConfig(),
+    )
+
+
+def test_no_override_no_top_level_returns_none():
+    config = _config(None, {"alpha": ProjectConfig(path="/p", telegram_bot_token="")})
+    assert resolve_project_slack("alpha", config) is None
+
+
+def test_top_level_only_returns_top_level():
+    top = SlackConfig(bot_token="xoxb-shared", app_token="xapp-shared", workspace_id="T012")
+    config = _config(top, {"alpha": ProjectConfig(path="/p", telegram_bot_token="")})
+    resolved = resolve_project_slack("alpha", config)
+    assert resolved is not None
+    assert resolved.bot_token == "xoxb-shared"
+
+
+def test_override_replaces_per_field():
+    top = SlackConfig(
+        bot_token="xoxb-shared",
+        app_token="xapp-shared",
+        workspace_id="T012",
+        socket_mode_enabled=True,
+    )
+    config = _config(top, {
+        "alpha": ProjectConfig(
+            path="/p",
+            telegram_bot_token="",
+            slack=SlackProjectOverride(
+                bot_token="xoxb-alpha",
+                workspace_id="T999",
+            ),
+        )
+    })
+
+    resolved = resolve_project_slack("alpha", config)
+    assert resolved is not None
+    # Per-project wins:
+    assert resolved.bot_token == "xoxb-alpha"
+    assert resolved.workspace_id == "T999"
+    # Operational defaults inherited from top-level:
+    assert resolved.app_token == "xapp-shared"
+    assert resolved.socket_mode_enabled is True
+
+
+def test_override_alone_returns_merged_config():
+    """Override with only bot_token set, no top-level — returns the override
+    merged onto the empty defaults. Downstream validators decide whether
+    the merge is complete enough to start."""
+    config = _config(None, {
+        "alpha": ProjectConfig(
+            path="/p",
+            telegram_bot_token="",
+            slack=SlackProjectOverride(bot_token="xoxb-alpha"),
+        )
+    })
+    resolved = resolve_project_slack("alpha", config)
+    assert resolved is not None
+    assert resolved.bot_token == "xoxb-alpha"
+    assert resolved.app_token == ""  # default — caller's responsibility to handle
+
+
+def test_unknown_project_returns_none():
+    config = _config(SlackConfig(bot_token="xoxb-shared"), {})
+    assert resolve_project_slack("does-not-exist", config) is None
+```
+
+- [ ] **Step 18: Verify RED**
+
+```
+PYTHONPATH=src python3 -m pytest tests/slack/test_resolver.py -q
+```
+Expected: 5 failed on `ImportError: cannot import name 'resolve_project_slack'`.
+
+- [ ] **Step 19: Implement the resolver**
+
+Create `src/link_project_to_chat/slack/__init__.py` (empty).
+
+Create `src/link_project_to_chat/slack/resolver.py`:
+
+```python
+"""Merge per-project slack overrides onto the top-level block.
+
+Mirror: src/link_project_to_chat/google_chat/resolver.py
+        resolve_project_google_chat (the GChat shipping arc proved the
+        per-field replace() pattern works cleanly across transports).
+"""
+from __future__ import annotations
+
+from dataclasses import fields, replace
+
+from link_project_to_chat.config import (
+    Config,
+    SlackConfig,
+    SlackProjectOverride,
+    _slack_top_is_meaningful,
+)
+
+
+def resolve_project_slack(project_name: str, config: Config) -> SlackConfig | None:
+    """Return the effective SlackConfig for ``project_name``, or None.
+
+    None means the project has no slack configured (neither override nor a
+    non-empty top-level block). The returned config is the result of
+    overlaying any per-project override field-by-field onto the top-level
+    block. Downstream validators decide whether the merged result is
+    complete enough to actually start a bot.
+
+    "Non-empty top-level" means at least one of ``bot_token`` or ``app_token``
+    is set — workspace_id alone is not enough to authenticate.
+    """
+    project = config.projects.get(project_name)
+    if project is None:
+        return None
+
+    override = project.slack
+    top_level = config.slack
+
+    top_is_meaningful = top_level is not None and _slack_top_is_meaningful(top_level)
+    if override is None and not top_is_meaningful:
+        return None
+
+    base = top_level if top_level is not None else SlackConfig()
+    if override is None:
+        return base
+
+    # Per-field replace: every non-None override field wins.
+    merged_kwargs = {}
+    for f in fields(SlackProjectOverride):
+        value = getattr(override, f.name)
+        if value is not None:
+            merged_kwargs[f.name] = value
+    return replace(base, **merged_kwargs)
+```
+
+- [ ] **Step 20: Verify GREEN**
+
+```
+PYTHONPATH=src python3 -m pytest tests/slack/test_resolver.py -q
+```
+Expected: 5 passed.
+
+- [ ] **Step 21: Commit**
+
+```bash
+git add src/link_project_to_chat/slack/__init__.py src/link_project_to_chat/slack/resolver.py tests/slack/test_resolver.py
+git commit -m "feat(slack): resolve_project_slack per-field merge helper"
 ```
 
 ---
@@ -946,6 +1573,57 @@ async def test_bot_own_messages_ignored():
     assert received == []
 
 
+async def test_own_bot_message_subtype_is_ignored():
+    """Self-echoes carry subtype='bot_message' AND bot_id matching our
+    bot user ID. The dispatcher must filter them out so we don't loop on
+    our own posts."""
+    from link_project_to_chat.transport import IncomingMessage
+
+    t = _make_mock_transport()
+    received: list[IncomingMessage] = []
+    t.on_message(lambda msg: received.append(msg))
+    t._bot_user_id = "B001"
+
+    event = {
+        "type": "message",
+        "subtype": "bot_message",
+        "bot_id": "B001",
+        "bot_profile": {"id": "B001", "name": "self"},
+        "text": "echo of our own post",
+        "channel": "C100",
+        "ts": "1234.0009",
+    }
+    await t._dispatch_slack_message(event)
+    assert received == []
+
+
+async def test_other_bot_message_subtype_is_dispatched():
+    """Lesson from Google Chat v1.0: a blanket subtype=='bot_message' skip
+    silently drops every peer bot's messages. The narrow rule is:
+    skip only when bot_id (or user) matches our OWN bot user ID. Messages
+    from OTHER bots must dispatch, with sender.is_bot=True."""
+    from link_project_to_chat.transport import IncomingMessage
+
+    t = _make_mock_transport()
+    received: list[IncomingMessage] = []
+    t.on_message(lambda msg: received.append(msg))
+    t._bot_user_id = "B001"
+
+    event = {
+        "type": "message",
+        "subtype": "bot_message",
+        "bot_id": "B999",  # different bot
+        "bot_profile": {"id": "B999", "name": "peer-bot"},
+        "text": "hello from peer bot",
+        "channel": "C100",
+        "ts": "1234.0010",
+    }
+    await t._dispatch_slack_message(event)
+    assert len(received) == 1
+    assert received[0].sender.is_bot is True
+    assert received[0].sender.native_id == "B999"
+
+
 async def test_dispatch_slack_message_dm():
     from link_project_to_chat.transport import IncomingMessage, ChatKind
 
@@ -976,14 +1654,42 @@ Expected: `AttributeError` — `_dispatch_slack_message` does not exist.
 
 - [ ] **Step 3: Implement `_dispatch_slack_message` and inject helpers**
 
+> **Lesson from the Google Chat v1.0 → v1.2 shipping arc:** a blanket
+> `subtype == "bot_message"` skip silently drops every peer-bot message in
+> the same channel — including other team bots. Slack tags every Slack-app
+> message with that subtype, so the filter has to be narrower: skip only the
+> bot's *own* echoes (matched via `bot_id == self._bot_user_id` or the user
+> matches our own bot user ID). Bot-to-bot messages from other bots still
+> dispatch, with `sender.is_bot=True` set from `bot_profile` presence.
+
 ```python
 async def _dispatch_slack_message(self, event: dict[str, Any]) -> None:
-    """Normalize a Slack message event into IncomingMessage and dispatch."""
-    user_id = event.get("user", "")
-    if user_id == self._bot_user_id:
-        return  # ignore own messages
-    if event.get("subtype") in ("bot_message", "message_changed", "message_deleted"):
+    """Normalize a Slack message event into IncomingMessage and dispatch.
+
+    Subtype filtering: ``message_changed`` / ``message_deleted`` are
+    structural edits, drop them. ``bot_message`` is NOT a blanket drop —
+    only self-echoes are ignored. Bot-to-bot routing depends on being
+    able to see other bots' messages.
+    """
+    if event.get("subtype") in ("message_changed", "message_deleted"):
         return
+
+    # Detect bot-sourced messages via bot_profile (Slack always sets this on
+    # bot-authored events). Subtype/user-ID prefix alone is unreliable:
+    # Slack apps post as their bot user ID (B...) but also as other shapes
+    # depending on how the app was registered.
+    event_user = event.get("user", "")
+    bot_profile = event.get("bot_profile")
+    is_bot = bool(bot_profile) or event_user.startswith("B")
+
+    # Skip ONLY if this is a self-message (echo of our own bot's posts).
+    # Compare both bot_id (set on bot_message subtype) and user (set on
+    # plain message events authored by the bot user).
+    if is_bot and (
+        event.get("bot_id") == self._bot_user_id
+        or event_user == self._bot_user_id
+    ):
+        return  # ignore own messages
 
     channel_id = event.get("channel", "")
     is_dm = channel_id.startswith("D")
@@ -991,7 +1697,10 @@ async def _dispatch_slack_message(self, event: dict[str, Any]) -> None:
     mentions = _parse_mentions(text, self._app.client)
 
     chat = _chat_ref_from_slack(channel_id, is_dm)
-    sender = _identity_from_slack_event(user_id)
+    sender = _identity_from_slack_event(
+        event_user or event.get("bot_id", ""),
+        is_bot=is_bot,
+    )
     incoming = IncomingMessage(
         chat=chat,
         sender=sender,
@@ -1134,10 +1843,17 @@ def _make_slack_transport_with_inject() -> SlackTransport:
     return t
 ```
 
-Update the fixture to include `"slack"`:
+Update the fixture to match the actually-shipped transports. The original
+plan listed Discord, but Discord (#2) was designed and never implemented;
+Google Chat (#4) shipped on `dev` first and now owns the slot Discord was
+holding. The fixture should reflect what's on disk, not the historical
+spec ordering:
 
 ```python
-@pytest.fixture(params=["fake", "telegram", "web", "discord", "slack"])
+# Discord (#2) is designed but not shipped; add it back to this fixture
+# list when its transport lands. Google Chat (#4) shipped first and
+# therefore takes Discord's slot in the parametrize tuple.
+@pytest.fixture(params=["fake", "telegram", "web", "google_chat", "slack"])
 async def transport(request, tmp_path):
     if request.param == "fake":
         yield FakeTransport()
@@ -1152,8 +1868,8 @@ async def transport(request, tmp_path):
         await t.start()
         yield t
         await t.stop()
-    elif request.param == "discord":
-        yield _make_discord_transport_with_inject()
+    elif request.param == "google_chat":
+        yield _make_google_chat_transport_with_inject()
     elif request.param == "slack":
         yield _make_slack_transport_with_inject()
     else:
