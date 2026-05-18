@@ -519,6 +519,25 @@ class GoogleChatTransport:
             }
         if "buttonClickedPayload" in chat:
             bp = chat.get("buttonClickedPayload") or {}
+            # [TRACE] Diagnostic: capture add-on CARD_CLICKED payload shape so
+            # we can confirm where Google routes the callback_token in the
+            # nested envelope. Strip once the dispatch bug is fixed.
+            common_event = payload.get("commonEventObject") or {}
+            logger.warning(
+                "[TRACE] addon CARD_CLICKED unwrap: bp.keys=%s, bp.action.keys=%s, "
+                "bp.common.keys=%s, commonEventObject.keys=%s, "
+                "commonEventObject.parameters.keys=%s, commonEventObject.formInputs.keys=%s",
+                sorted(bp.keys()),
+                sorted((bp.get("action") or {}).keys()),
+                sorted((bp.get("common") or {}).keys()),
+                sorted(common_event.keys()),
+                sorted((common_event.get("parameters") or {}).keys())
+                if isinstance(common_event.get("parameters"), dict)
+                else f"non-dict:{type(common_event.get('parameters')).__name__}",
+                sorted((common_event.get("formInputs") or {}).keys())
+                if isinstance(common_event.get("formInputs"), dict)
+                else "absent",
+            )
             return {
                 "type": "CARD_CLICKED",
                 "eventTime": bp.get("eventTime") or common_time,
@@ -527,6 +546,9 @@ class GoogleChatTransport:
                 "message": bp.get("message", {}),
                 "action": bp.get("action", {}),
                 "common": bp.get("common", {}),
+                # [TRACE] Surface the outer commonEventObject too so the
+                # dispatcher diagnostic can see it.
+                "_commonEventObject": common_event,
             }
         return payload
 
@@ -734,6 +756,20 @@ class GoogleChatTransport:
             params.update(common_params)
         token = params.get("callback_token")
         if not token:
+            # [TRACE] Diagnostic: capture where the token actually lives so we
+            # can fix the unwrap. Strip once the dispatch bug is fixed.
+            outer_common = payload.get("_commonEventObject") or {}
+            outer_params = outer_common.get("parameters") or {}
+            outer_form = outer_common.get("formInputs") or {}
+            logger.warning(
+                "[TRACE] CARD_CLICKED no token in action/common. "
+                "action.parameters=%s, common.parameters=%s, "
+                "outer commonEventObject.parameters=%s, formInputs.keys=%s",
+                action.get("parameters"),
+                common_params,
+                outer_params,
+                sorted(outer_form.keys()) if isinstance(outer_form, dict) else "non-dict",
+            )
             logger.warning("CARD_CLICKED missing callback_token; dropping")
             return
         try:
