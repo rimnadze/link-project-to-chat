@@ -4,8 +4,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from link_project_to_chat.config import (
     Config,
     GoogleChatConfig,
@@ -228,8 +226,10 @@ def test_start_autostart_spawns_telegram_and_google_chat(monkeypatch, tmp_path):
     def fake_popen(cmd, **kwargs):
         spawned.append(cmd)
         class FakeProc:
+            stdout = iter([])  # empty iterator → capture loop ends cleanly
             pid = 10000 + len(spawned)
             def poll(self): return None
+            def wait(self, timeout=None): return 0
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -263,18 +263,11 @@ def test_start_autostart_spawns_telegram_and_google_chat(monkeypatch, tmp_path):
     save_config(config, cfg_path)
     pm = ProcessManager(project_config_path=cfg_path)
 
-    # Use whatever the actual autostart method is named on this codebase.
-    # Common alternatives: start_autostart, start_all, run_autostart.
-    if hasattr(pm, "start_autostart"):
-        pm.start_autostart()
-    elif hasattr(pm, "start_all"):
-        pm.start_all()
-    else:
-        pytest.fail("ProcessManager has no autostart method — check the API")
+    pm.start_autostart()
 
     # Discriminate spawn types by argv content.
-    telegram_spawns = [c for c in spawned if "--transport" not in c or "google_chat" not in c]
-    google_chat_spawns = [c for c in spawned if "--transport" in c and "google_chat" in c]
+    telegram_spawns = [c for c in spawned if "--transport" not in c]
+    google_chat_spawns = [c for c in spawned if "--transport" in c]
     # Alpha + Beta both get Telegram bots (existing behavior).
     assert len(telegram_spawns) == 2, f"Expected 2 telegram spawns, got {len(telegram_spawns)}: {spawned}"
     # Only Alpha gets a Google Chat bot.

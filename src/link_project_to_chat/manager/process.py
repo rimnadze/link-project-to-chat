@@ -637,6 +637,14 @@ class ProcessManager:
         Teams whose ``group_chat_id`` is still the ``0`` sentinel (group not yet
         captured after ``/create_team``) are skipped — starting them would
         produce a bot with no group to attach to.
+
+        For every project with a resolved google_chat configuration, a Google
+        Chat subprocess is also spawned — this does NOT honor the per-project
+        ``autostart`` flag (google_chat bots run if configured at all). This
+        intentional asymmetry mirrors how the manager's webhook gateway model
+        differs from the poll-based Telegram client: a Google Chat bot only
+        receives traffic while its HTTP listener is up, so "configured" is
+        treated as the operator's standing intent to receive on that port.
         """
         count = 0
         config = load_config(self._project_config_path) if self._project_config_path else load_config()
