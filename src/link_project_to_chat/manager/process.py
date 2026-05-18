@@ -475,40 +475,37 @@ class ProcessManager:
             "--google-chat-config-json", blob,
         ])
         proc = subprocess.Popen(cmd, **_process_popen_kwargs())
+        setattr(proc, "_kill_process_tree", True)
         self.google_chat_pids[project_name] = proc.pid
         self._google_chat_procs[project_name] = proc
         logger.info("Started google_chat bot %s (pid=%d)", project_name, proc.pid)
         return True
 
     def stop_google_chat_subprocess(self, project_name: str) -> bool:
-        """SIGTERM the project's google_chat subprocess.
+        """Terminate the project's google_chat subprocess.
 
-        Returns True if a subprocess was tracked (and signalled), False if
-        nothing was running. Clears both ``google_chat_pids`` and
-        ``_google_chat_procs`` regardless of whether the underlying process
-        was still alive — the bookkeeping is the source of truth for
-        "is this project running" and must be left consistent.
+        Routes through ``_terminate_process_tree`` so the kill escalates to
+        SIGKILL across the whole process group (uvicorn workers, etc.) and
+        does not silently leave a half-stuck server holding the port.
+
+        Returns True if a subprocess was tracked, False if nothing was
+        running. Clears both ``google_chat_pids`` and ``_google_chat_procs``
+        regardless of whether the underlying process was still alive — the
+        bookkeeping is the source of truth for "is this project running"
+        and must be left consistent.
         """
         proc = self._google_chat_procs.pop(project_name, None)
         self.google_chat_pids.pop(project_name, None)
         if proc is None:
             return False
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            # Already gone — bookkeeping is now consistent, treat as success.
-            return True
-        try:
-            proc.wait(timeout=5)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+        _terminate_process_tree(proc)
         logger.info("Stopped google_chat bot %s", project_name)
         return True
 
     def restart_google_chat_subprocess(self, project_name: str) -> bool:
         """Stop then start. Returns the ``start_google_chat_subprocess`` result.
 
-        A failed stop is non-fatal (means nothing was running); the start
+        A False stop result just means nothing was running; the start
         result is what callers care about.
         """
         self.stop_google_chat_subprocess(project_name)
