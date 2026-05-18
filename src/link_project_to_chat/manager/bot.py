@@ -2292,8 +2292,40 @@ class ManagerBot(AuthMixin):
         rows.append([Button(label="Plugins", value=f"proj_plugins_{name}")])
         rows.append([Button(label="Edit", value=f"proj_edit_{name}")])
         rows.append([Button(label="Remove", value=f"proj_remove_{name}")])
+        rows.extend(self._google_chat_button_rows(name))
         rows.append([Button(label="« Back", value="proj_back")])
         return Buttons(rows=rows)
+
+    def _google_chat_button_rows(self, name: str) -> list[list[Button]]:
+        """Per-project Google Chat keyboard rows.
+
+        Returns an 'Add Google Chat' row when the project has no
+        ``google_chat`` override, or Edit/Restart/Remove rows when it does.
+        The callback values follow the existing ``proj_<verb>_<name>``
+        convention (extended with a ``gchat`` discriminator).
+        """
+        project = self._load_projects().get(name, {})
+        if not project.get("google_chat"):
+            return [[Button(
+                label="Add Google Chat",
+                value=f"proj_add_gchat_{name}",
+            )]]
+        return [
+            [
+                Button(
+                    label="Edit Google Chat",
+                    value=f"proj_edit_gchat_{name}",
+                ),
+                Button(
+                    label="Restart Google Chat",
+                    value=f"proj_restart_gchat_{name}",
+                ),
+            ],
+            [Button(
+                label="Remove Google Chat",
+                value=f"proj_remove_gchat_{name}",
+            )],
+        ]
 
     def _available_plugins(self) -> list[str]:
         """Return sorted entry-point names registered under ``lptc.plugins``."""
