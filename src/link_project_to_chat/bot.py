@@ -744,7 +744,8 @@ class ProjectBot(AuthMixin):
                 # The StreamingMessage buffer already holds every streamed text delta (narration
                 # + final answer); overwriting it would make intermediate narration vanish.
                 # Fall back to task.result only when the buffer is empty (stream dropped).
-                has_buffer = bool(live_text.buffer.strip())
+                # Use full_text (not buffer) so rotations don't truncate the persisted turn.
+                has_buffer = bool(live_text.full_text.strip())
                 has_result = bool((task.result or "").strip())
                 if not has_buffer and not has_result:
                     # Claude turn ended with only tool_use blocks (no text output). The
@@ -756,7 +757,7 @@ class ProjectBot(AuthMixin):
                     )
                 else:
                     fallback = task.result if not has_buffer else None
-                    assistant_text = live_text.buffer if has_buffer else task.result
+                    assistant_text = live_text.full_text if has_buffer else task.result
                     await live_text.finalize(fallback, render=True)
                 await self._send_completion_notice(task)
             else:
