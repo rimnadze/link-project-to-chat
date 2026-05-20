@@ -209,7 +209,10 @@ class GitLabClient:
         code, stdout, stderr = await _run_glab(*args)
         if code != 0:
             return None
-        return _repo_info_from_project(json.loads(stdout))
+        parsed = json.loads(stdout)
+        if not isinstance(parsed, dict) or "path" not in parsed:
+            return None  # error response (e.g. {"message": "401"} or {"error": ...})
+        return _repo_info_from_project(parsed)
 
     async def _clone_glab(self, repo: RepoInfo, dest: Path) -> None:
         env = None

@@ -385,6 +385,16 @@ async def test_validate_repo_url_rejects_bare_path(gl_api_client):
     assert info is None
 
 
+async def test_validate_repo_url_glab_returns_none_on_dict_message_response(gl_glab_client):
+    """When glab returns {'message': '404 ...'}, validate should return None (not raise TypeError)."""
+    import json
+    body = json.dumps({"message": "404 Not Found"})
+    with patch("link_project_to_chat.gitlab_client._run_glab",
+               AsyncMock(return_value=(0, body, ""))):
+        info = await gl_glab_client.validate_repo_url("https://gitlab.com/u/repo")
+    assert info is None
+
+
 async def test_validate_repo_url_not_found(gl_api_client):
     with patch.object(gl_api_client, "_client") as mock_client:
         mock_client.get = AsyncMock(return_value=_mock_resp(404, {"message": "Not Found"}))
