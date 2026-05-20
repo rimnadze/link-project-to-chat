@@ -311,6 +311,18 @@ def projects_edit(ctx, name: str, field: str, value: str):
     ),
 )
 @click.option("--manager-token", default=None, help="Telegram bot token for the manager bot")
+@click.option(
+    "--gitlab-pat",
+    "gitlab_pat",
+    default=None,
+    help="GitLab personal access token (stored in config.json with 0o600 perms).",
+)
+@click.option(
+    "--gitlab-host",
+    "gitlab_host",
+    default=None,
+    help="GitLab host (default: gitlab.com). Bare hostname only -- no scheme, no path.",
+)
 @click.pass_context
 def configure(
     ctx,
@@ -320,14 +332,20 @@ def configure(
     remove_user: str | None,
     reset_user_identity: str | None,
     manager_token: str | None,
+    gitlab_pat: str | None,
+    gitlab_host: str | None,
 ):
     """Configure allowed users and/or manager bot token."""
     from .config import AllowedUser
 
-    if not any([username, remove_username, add_user, remove_user, reset_user_identity, manager_token]):
+    if not any([
+        username, remove_username, add_user, remove_user, reset_user_identity,
+        manager_token, gitlab_pat, gitlab_host,
+    ]):
         raise SystemExit(
             "Provide at least one of --add-user, --remove-user, --reset-user-identity, "
-            "--username, --remove-username, or --manager-token."
+            "--username, --remove-username, --manager-token, --gitlab-pat, "
+            "or --gitlab-host."
         )
 
     cfg_path = ctx.obj["config_path"]
@@ -401,6 +419,21 @@ def configure(
         config.manager_telegram_bot_token = manager_token
         click.echo(f"Configured manager token: ***{manager_token[-4:]}")
         save_config(config, cfg_path)
+
+    if gitlab_pat is not None:
+        config.gitlab_pat = gitlab_pat
+        save_config(config, cfg_path)
+        click.echo("GitLab PAT saved.")
+
+    if gitlab_host is not None:
+        if "://" in gitlab_host or "/" in gitlab_host.rstrip("/"):
+            raise click.UsageError(
+                "--gitlab-host must be a bare hostname (e.g. gitlab.example.com); "
+                "no scheme, no path."
+            )
+        config.gitlab_host = gitlab_host.rstrip("/")
+        save_config(config, cfg_path)
+        click.echo(f"GitLab host set to {config.gitlab_host}.")
 
 
 @main.command()

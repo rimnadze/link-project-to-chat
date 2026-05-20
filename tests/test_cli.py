@@ -1734,3 +1734,47 @@ def test_start_warns_on_unknown_google_chat_config_json_keys(monkeypatch, tmp_pa
     assert captured["config"].google_chat.port == 8091
     assert any("future_field_we_dont_know" in rec.getMessage() for rec in caplog.records), \
         f"warning not emitted: {[r.getMessage() for r in caplog.records]}"
+
+
+# --- configure --gitlab-pat / --gitlab-host (Task 6) ---
+
+def test_configure_sets_gitlab_pat(tmp_path):
+    """`configure --gitlab-pat <pat>` writes gitlab_pat to disk."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(cfg), "configure", "--gitlab-pat", "glpat-secret"],
+    )
+    assert result.exit_code == 0, result.output
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_pat"] == "glpat-secret"
+
+
+def test_configure_sets_gitlab_host(tmp_path):
+    """`configure --gitlab-host <host>` writes gitlab_host to disk."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(cfg), "configure", "--gitlab-host", "gitlab.example.com"],
+    )
+    assert result.exit_code == 0, result.output
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_host"] == "gitlab.example.com"
+
+
+def test_configure_rejects_gitlab_host_with_scheme(tmp_path):
+    """`--gitlab-host` rejects URLs with scheme; must be a bare hostname."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+    result = CliRunner().invoke(
+        main,
+        [
+            "--config", str(cfg), "configure",
+            "--gitlab-host", "https://gitlab.example.com",
+        ],
+    )
+    assert result.exit_code != 0
+    output = (result.output + (result.stderr or "")).lower()
+    assert "scheme" in output or "host" in output
