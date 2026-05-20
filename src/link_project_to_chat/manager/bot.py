@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import logging
 import time
@@ -1495,7 +1496,10 @@ class ManagerBot(AuthMixin):
                 bf = BotFatherClient(config.telegram_api_id, config.telegram_api_hash, session_path)
                 ctx.user_data["setup_bf_client"] = bf
                 client = await bf._ensure_client()
-                await client.send_code_request(text)
+                # Finding 9: bound the Telethon call so a hung session doesn't
+                # wedge the wizard. On timeout reset setup_awaiting so the
+                # operator's next text isn't misinterpreted as a code.
+                await asyncio.wait_for(client.send_code_request(text), timeout=30.0)
                 # Telegram invalidates login codes typed verbatim into any chat
                 # (security feature). Ask the user to obfuscate so the official
                 # client doesn't pattern-match it; we strip non-digits below.
@@ -1504,6 +1508,15 @@ class ManagerBot(AuthMixin):
                     "Code sent to your Telegram. Enter the code with spaces "
                     "between digits (e.g. 1 2 3 4 5) — Telegram auto-expires "
                     "codes typed as plain digits.",
+                )
+            except asyncio.TimeoutError:
+                ctx.user_data.pop("setup_awaiting", None)
+                ctx.user_data.pop("setup_bf_client", None)
+                ctx.user_data.pop("setup_phone", None)
+                await self._transport.send_text(
+                    chat,
+                    "Telegram is slow — send_code_request timed out. "
+                    "Run /setup again.",
                 )
             except Exception as e:
                 ctx.user_data.pop("setup_awaiting", None)
@@ -1519,13 +1532,21 @@ class ManagerBot(AuthMixin):
             try:
                 client = await bf._ensure_client()
                 code = "".join(ch for ch in text if ch.isdigit())
-                await client.sign_in(phone, code)
+                # Finding 9: bound Telethon sign_in.
+                await asyncio.wait_for(client.sign_in(phone, code), timeout=30.0)
                 self._adopt_setup_client(bf, client)
                 ctx.user_data.pop("setup_awaiting")
                 ctx.user_data.pop("setup_bf_client", None)
                 ctx.user_data.pop("setup_phone", None)
                 await self._transport.send_text(
                     chat, "Authenticated! You can now use /create_project.",
+                )
+            except asyncio.TimeoutError:
+                ctx.user_data.pop("setup_awaiting", None)
+                ctx.user_data.pop("setup_bf_client", None)
+                ctx.user_data.pop("setup_phone", None)
+                await self._transport.send_text(
+                    chat, "Telegram is slow — sign_in timed out. Run /setup again.",
                 )
             except Exception as e:
                 if "Two-steps verification" in str(e) or "password" in str(e).lower():
@@ -1543,13 +1564,21 @@ class ManagerBot(AuthMixin):
                 return
             try:
                 client = await bf._ensure_client()
-                await client.sign_in(password=text)
+                # Finding 9: bound Telethon sign_in (2FA path).
+                await asyncio.wait_for(client.sign_in(password=text), timeout=30.0)
                 self._adopt_setup_client(bf, client)
                 ctx.user_data.pop("setup_awaiting")
                 ctx.user_data.pop("setup_bf_client", None)
                 ctx.user_data.pop("setup_phone", None)
                 await self._transport.send_text(
                     chat, "Authenticated with 2FA! You can now use /create_project.",
+                )
+            except asyncio.TimeoutError:
+                ctx.user_data.pop("setup_awaiting", None)
+                ctx.user_data.pop("setup_bf_client", None)
+                ctx.user_data.pop("setup_phone", None)
+                await self._transport.send_text(
+                    chat, "Telegram is slow — 2FA sign_in timed out. Run /setup again.",
                 )
             except Exception as e:
                 ctx.user_data.pop("setup_awaiting", None)

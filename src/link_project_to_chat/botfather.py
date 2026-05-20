@@ -34,6 +34,28 @@ class BotFatherRateLimit(Exception):
         self.retry_after = retry_after
 
 
+class BotFatherTimeout(Exception):
+    """BotFather (or Telegram itself) didn't respond within the per-call
+    timeout. Caller should surface "BotFather is slow — try again." instead
+    of letting the wizard hang indefinitely (findings 4+9)."""
+
+
+_TELETHON_TIMEOUT_SECONDS = 30.0
+
+
+async def _bf_call(coro, step: str):
+    """Wrap a single Telethon awaitable in asyncio.wait_for so a hung
+    Telegram session can't pin the whole wizard. Converts TimeoutError to
+    a domain-specific BotFatherTimeout that the caller can surface."""
+    try:
+        return await asyncio.wait_for(coro, timeout=_TELETHON_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise BotFatherTimeout(
+            f"BotFather call timed out at {step} after "
+            f"{_TELETHON_TIMEOUT_SECONDS:.0f}s — try again."
+        ) from exc
+
+
 def _parse_rate_limit(text: str) -> float | None:
     """Return the hinted retry_after in seconds if ``text`` is a BotFather
     throttle reply, else None. Falls back to 60s when the text signals
@@ -135,13 +157,16 @@ class BotFatherClient:
         await client.start(phone=phone, code_callback=code_callback, password=password_callback)
 
     async def create_bot(self, display_name: str, username: str) -> str:
+        # Findings 4+9: every Telethon call wrapped in asyncio.wait_for so a
+        # hung Telegram session can't pin the whole wizard. Timeouts surface
+        # as BotFatherTimeout for the caller to render a clean error.
         client = await self._ensure_client()
-        if not await client.is_user_authorized():
+        if not await _bf_call(client.is_user_authorized(), "is_user_authorized"):
             raise Exception("Not authenticated. Run /setup first.")
-        entity = await client.get_entity(_BOTFATHER)
+        entity = await _bf_call(client.get_entity(_BOTFATHER), "get_entity")
 
         async def _latest_text() -> str:
-            msgs = await client.get_messages(entity, limit=1)
+            msgs = await _bf_call(client.get_messages(entity, limit=1), "get_messages")
             if not msgs:
                 return ""
             return msgs[0].text or ""
@@ -154,7 +179,7 @@ class BotFatherClient:
                     retry_after=wait,
                 )
 
-        await client.send_message(entity, "/newbot")
+        await _bf_call(client.send_message(entity, "/newbot"), "send_message /newbot")
         await asyncio.sleep(1.5)
         # BotFather rate-limits `/newbot` itself (not just username picks) —
         # if we don't check here we keep firing display_name + username at a
@@ -162,7 +187,9 @@ class BotFatherClient:
         # generic help text as an "unexpected" failure and burn suffix retries.
         _raise_if_throttled(await _latest_text(), "/newbot")
 
-        await client.send_message(entity, display_name)
+        await _bf_call(
+            client.send_message(entity, display_name), "send_message display_name",
+        )
         await asyncio.sleep(1.5)
         _raise_if_throttled(await _latest_text(), "display_name")
 
@@ -171,9 +198,13 @@ class BotFatherClient:
             trial_username = username if attempt == 0 else f"{username.rstrip('bot')}_{attempt + 1}_bot"
             if not trial_username.endswith("bot"):
                 trial_username += "_bot"
-            await client.send_message(entity, trial_username)
+            await _bf_call(
+                client.send_message(entity, trial_username), "send_message username",
+            )
             await asyncio.sleep(2)
-            messages = await client.get_messages(entity, limit=1)
+            messages = await _bf_call(
+                client.get_messages(entity, limit=1), "get_messages",
+            )
             if not messages:
                 continue
             response_text = messages[0].text or ""
@@ -193,9 +224,14 @@ class BotFatherClient:
                 logger.info("Username @%s taken, retrying...", trial_username)
                 if attempt < max_retries:
                     await asyncio.sleep(3 * (attempt + 1))
-                    await client.send_message(entity, "/newbot")
+                    await _bf_call(
+                        client.send_message(entity, "/newbot"), "send_message /newbot",
+                    )
                     await asyncio.sleep(1.5)
-                    await client.send_message(entity, display_name)
+                    await _bf_call(
+                        client.send_message(entity, display_name),
+                        "send_message display_name",
+                    )
                     await asyncio.sleep(1.5)
                 continue
             raise Exception(f"Unexpected BotFather response: {response_text[:200]}")
@@ -207,15 +243,20 @@ class BotFatherClient:
         Raises on unexpected BotFather reply so the caller can report.
         """
         client = await self._ensure_client()
-        entity = await client.get_entity(_BOTFATHER)
-        await client.send_message(entity, "/deletebot")
+        entity = await _bf_call(client.get_entity(_BOTFATHER), "get_entity")
+        await _bf_call(client.send_message(entity, "/deletebot"), "send_message /deletebot")
         await asyncio.sleep(1.5)
-        await client.send_message(entity, f"@{bot_username}")
+        await _bf_call(
+            client.send_message(entity, f"@{bot_username}"), "send_message @username",
+        )
         await asyncio.sleep(1.5)
         # BotFather requires the literal phrase "Yes, I am totally sure." to confirm.
-        await client.send_message(entity, "Yes, I am totally sure.")
+        await _bf_call(
+            client.send_message(entity, "Yes, I am totally sure."),
+            "send_message confirm",
+        )
         await asyncio.sleep(1.5)
-        messages = await client.get_messages(entity, limit=1)
+        messages = await _bf_call(client.get_messages(entity, limit=1), "get_messages")
         if messages:
             text = (messages[0].text or "").lower()
             if "done" in text or "deleted" in text or "gone" in text:
@@ -238,12 +279,18 @@ class BotFatherClient:
         (Telegram filters them by default).
         """
         client = await self._ensure_client()
-        entity = await client.get_entity(_BOTFATHER)
-        await client.send_message(entity, "/setprivacy")
+        entity = await _bf_call(client.get_entity(_BOTFATHER), "get_entity")
+        await _bf_call(
+            client.send_message(entity, "/setprivacy"), "send_message /setprivacy",
+        )
         await asyncio.sleep(1.5)
-        await client.send_message(entity, f"@{bot_username}")
+        await _bf_call(
+            client.send_message(entity, f"@{bot_username}"), "send_message @username",
+        )
         await asyncio.sleep(1.5)
-        await client.send_message(entity, "Disable")
+        await _bf_call(
+            client.send_message(entity, "Disable"), "send_message Disable",
+        )
 
     async def disconnect(self) -> None:
         # Only disconnect if we own the client — a shared external client is
