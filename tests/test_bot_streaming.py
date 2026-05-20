@@ -199,6 +199,69 @@ async def test_team_bot_finalize_edits_placeholder_no_new_send():
 
 
 @pytest.mark.asyncio
+async def test_send_html_chains_chunks_replying_to_previous_chunk():
+    """When a long HTML message splits into multiple chunks, chunk 1 replies
+    to the user's message, chunk 2 replies to chunk 1, chunk 3 replies to
+    chunk 2, etc. Gives every transport a native sense of 'these messages
+    belong together' (threads on GChat/Slack, reply chains on Telegram/Discord).
+    """
+    from link_project_to_chat.bot import ProjectBot
+
+    bot = ProjectBot.__new__(ProjectBot)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    chat = ChatRef(transport_id="fake", native_id="42", kind=ChatKind.DM)
+    user_message = MessageRef(transport_id="fake", native_id="user-1", chat=chat)
+
+    # Force a 3-chunk split: build HTML well over fake's 4096-char limit.
+    # Use long paragraphs so split_html cuts at paragraph boundaries cleanly.
+    paragraph = "<p>" + ("x" * 3500) + "</p>"
+    html = paragraph + paragraph + paragraph  # ~10500 chars / 4096 limit = 3 chunks
+
+    last_ref = await bot._send_html(chat, html, reply_to=user_message)
+
+    sent = fake.sent_messages
+    assert len(sent) >= 2, f"expected multi-chunk send, got {len(sent)} chunk(s)"
+
+    # Chunk 1 replies to the user's message.
+    assert sent[0].reply_to == user_message, (
+        f"chunk 0 should reply to user message, got {sent[0].reply_to!r}"
+    )
+    # Chunk 2 replies to chunk 1's MessageRef.
+    assert sent[1].reply_to == sent[0].message, (
+        f"chunk 1 should reply to chunk 0's MessageRef ({sent[0].message!r}), "
+        f"got {sent[1].reply_to!r}"
+    )
+    # If there are more chunks, each replies to its immediate predecessor.
+    for i in range(2, len(sent)):
+        assert sent[i].reply_to == sent[i - 1].message, (
+            f"chunk {i} should reply to chunk {i-1}'s MessageRef, "
+            f"got {sent[i].reply_to!r}"
+        )
+    # Last sent chunk's MessageRef is what `_send_html` returns.
+    assert last_ref == sent[-1].message
+
+
+@pytest.mark.asyncio
+async def test_send_html_single_chunk_uses_original_reply_to():
+    """Sanity: short messages (one chunk) still reply to the original target."""
+    from link_project_to_chat.bot import ProjectBot
+
+    bot = ProjectBot.__new__(ProjectBot)
+    fake = FakeTransport()
+    bot._transport = fake
+
+    chat = ChatRef(transport_id="fake", native_id="42", kind=ChatKind.DM)
+    user_message = MessageRef(transport_id="fake", native_id="user-1", chat=chat)
+
+    await bot._send_html(chat, "<p>short</p>", reply_to=user_message)
+
+    assert len(fake.sent_messages) == 1
+    assert fake.sent_messages[0].reply_to == user_message
+
+
+@pytest.mark.asyncio
 async def test_thinking_delta_in_group_mode_uses_buffer_not_livestream():
     """Even with show_thinking=True, team bots skip the thinking livestream
     and fall through to `_thinking_buf` (which feeds the Thinking button).

@@ -574,16 +574,27 @@ class ProjectBot(AuthMixin):
         reply_to: MessageRef | None = None,
         reply_markup: Buttons | None = None,
     ) -> MessageRef | None:
-        """Send HTML message(s), attaching buttons to the last chunk. Returns the last sent ref."""
+        """Send HTML message(s), attaching buttons to the last chunk. Returns the last sent ref.
+
+        For multi-chunk messages, each chunk replies to the previous chunk
+        (linear chain). The first chunk replies to ``reply_to``. This gives
+        every transport a native sense of "these messages belong together":
+        Google Chat and Slack keep all chunks in the same thread; Telegram
+        and Discord render a reply chain. If a chunk's send fails entirely,
+        the next chunk falls back to the last successful parent rather than
+        breaking the chain.
+        """
         assert self._transport is not None
         chunks = split_html(html, limit=self._transport.max_text_length)
         last_ref: MessageRef | None = None
+        chain_parent: MessageRef | None = reply_to
         for i, chunk in enumerate(chunks):
             is_last = i == len(chunks) - 1
             btns = reply_markup if is_last else None
+            sent_ref: MessageRef | None = None
             try:
-                last_ref = await self._transport.send_text(
-                    chat, chunk, html=True, reply_to=reply_to, buttons=btns,
+                sent_ref = await self._transport.send_text(
+                    chat, chunk, html=True, reply_to=chain_parent, buttons=btns,
                 )
             except Exception as exc:
                 # The transport already retries on deleted-reply-target. Anything
@@ -594,14 +605,19 @@ class ProjectBot(AuthMixin):
                 plain = strip_html(chunk).replace("\x00", "")
                 if plain.strip():
                     try:
-                        last_ref = await self._transport.send_text(
+                        sent_ref = await self._transport.send_text(
                             chat,
                             plain[:self._transport.max_text_length] if len(plain) > self._transport.max_text_length else plain,
-                            reply_to=reply_to,
+                            reply_to=chain_parent,
                             buttons=btns,
                         )
                     except Exception:
                         logger.error("Plain-text fallback also failed", exc_info=True)
+            if sent_ref is not None:
+                last_ref = sent_ref
+                chain_parent = sent_ref  # next chunk replies to this one
+            # if sent_ref is None (both send paths failed), keep chain_parent
+            # so the NEXT chunk still attaches to the last successful message.
         return last_ref
 
     async def _send_to_chat(
@@ -728,7 +744,8 @@ class ProjectBot(AuthMixin):
                 # The StreamingMessage buffer already holds every streamed text delta (narration
                 # + final answer); overwriting it would make intermediate narration vanish.
                 # Fall back to task.result only when the buffer is empty (stream dropped).
-                has_buffer = bool(live_text.buffer.strip())
+                # Use full_text (not buffer) so rotations don't truncate the persisted turn.
+                has_buffer = bool(live_text.full_text.strip())
                 has_result = bool((task.result or "").strip())
                 if not has_buffer and not has_result:
                     # Claude turn ended with only tool_use blocks (no text output). The
@@ -740,7 +757,7 @@ class ProjectBot(AuthMixin):
                     )
                 else:
                     fallback = task.result if not has_buffer else None
-                    assistant_text = live_text.buffer if has_buffer else task.result
+                    assistant_text = live_text.full_text if has_buffer else task.result
                     await live_text.finalize(fallback, render=True)
                 await self._send_completion_notice(task)
             else:

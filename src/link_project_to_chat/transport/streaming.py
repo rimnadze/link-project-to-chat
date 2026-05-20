@@ -51,6 +51,7 @@ class StreamingMessage:
         self._effective_throttle = throttle
         self._max_chars = max_chars
         self._buffer: str = ""
+        self._sealed_text: str = ""
         self._last_rendered: str = ""
         self._last_edit_ts: float = 0.0
         self._pending: asyncio.Task | None = None
@@ -61,6 +62,11 @@ class StreamingMessage:
     @property
     def buffer(self) -> str:
         return self._buffer
+
+    @property
+    def full_text(self) -> str:
+        """The complete streamed text, including chunks already sealed by rotation."""
+        return self._sealed_text + self._buffer
 
     @property
     def message_id(self) -> str | None:
@@ -179,6 +185,7 @@ class StreamingMessage:
         self._current_ref = await self._transport.send_text(
             self._chat, self._prefix + initial, reply_to=self._reply_to,
         )
+        self._sealed_text += head
         self._buffer = tail
         self._last_rendered = self._prefix + initial
         self._last_edit_ts = time.monotonic()

@@ -101,6 +101,23 @@ async def test_exact_limit_does_not_rotate_into_new_message():
     assert t.edited_messages[-1].text == "x" * 20
 
 
+async def test_full_text_preserves_content_across_rotations():
+    """After rotation seals an earlier chunk, ``full_text`` must still expose
+    the full accumulated stream — otherwise the bot's conversation_log only
+    captures the tail (the live buffer is truncated on every rotation).
+    """
+    t = FakeTransport()
+    sm = StreamingMessage(t, _chat(), throttle=0, max_chars=20)
+    await sm.start()
+    payload = "x" * 50
+    await sm.append(payload)
+    await sm.finalize(render=False)
+    # At least one rotation happened (>1 sent message).
+    assert len(t.sent_messages) >= 2
+    # The full accumulated stream must still be reachable post-rotation.
+    assert sm.full_text == payload
+
+
 def test_prefix_must_be_shorter_than_max_chars():
     with pytest.raises(ValueError, match="prefix"):
         StreamingMessage(FakeTransport(), _chat(), prefix="x" * 5, max_chars=5)
