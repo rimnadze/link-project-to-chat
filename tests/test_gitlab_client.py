@@ -224,6 +224,11 @@ async def test_list_repos_httpx_maps_fields(gl_api_client):
     assert [r.private for r in repos] == [True, True, False]  # internal counts as non-public
     assert repos[1].description == ""  # None coerced to ""
     assert has_next is False
+    # Workaround: order_by=last_activity_at + simple=true avoids the GitLab
+    # /projects 500 bug triggered by deletion-pending projects + heavy joins.
+    params = mock_client.get.await_args.kwargs["params"]
+    assert params["order_by"] == "last_activity_at"
+    assert params["simple"] == "true"
 
 
 async def test_list_repos_httpx_detects_next_page(gl_api_client):
@@ -271,6 +276,11 @@ async def test_list_repos_glab_parses_link_header_and_body(gl_glab_client):
     assert args[0] == "api"
     assert "--include" in args
     assert any("projects" in a and "membership=true" in a for a in args)
+    # Workaround: order_by=last_activity_at + simple=true avoids the GitLab
+    # /projects 500 bug triggered by deletion-pending projects + heavy joins.
+    assert any(
+        "order_by=last_activity_at" in a and "simple=true" in a for a in args
+    )
 
 
 async def test_list_repos_glab_self_hosted_uses_hostname(monkeypatch):
