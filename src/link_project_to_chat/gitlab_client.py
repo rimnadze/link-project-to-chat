@@ -55,6 +55,18 @@ async def _run_glab(*args: str) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
 
+def _repo_info_from_project(p: dict) -> RepoInfo:
+    """Map a GitLab `/projects` payload entry to RepoInfo."""
+    return RepoInfo(
+        name=p["path"],
+        full_name=p["path_with_namespace"],
+        html_url=p["web_url"],
+        clone_url=p["http_url_to_repo"],
+        description=p.get("description") or "",
+        private=p.get("visibility", "private") != "public",
+    )
+
+
 def _redact_secrets(text: str, *secrets: str, host: str) -> str:
     """Strip raw PATs, their base64 forms, and credential-URL forms from text."""
     redacted = text
@@ -92,6 +104,27 @@ class GitLabClient:
                 headers={"PRIVATE-TOKEN": pat},
                 timeout=30.0,
             )
+
+    async def list_repos(self, page: int = 1, per_page: int = 5) -> tuple[list[RepoInfo], bool]:
+        if self._use_glab:
+            return await self._list_repos_glab(page, per_page)
+        return await self._list_repos_api(page, per_page)
+
+    async def _list_repos_api(self, page: int, per_page: int) -> tuple[list[RepoInfo], bool]:
+        resp = await self._client.get(
+            "/projects",
+            params={
+                "membership": "true",
+                "order_by": "updated_at",
+                "page": page,
+                "per_page": per_page,
+            },
+        )
+        if resp.status_code != 200:
+            raise Exception(f"GitLab API error {resp.status_code}: {resp.json().get('message', '')}")
+        repos = [_repo_info_from_project(p) for p in resp.json()]
+        has_next = 'rel="next"' in resp.headers.get("link", "")
+        return repos, has_next
 
     async def close(self) -> None:
         if self._client:

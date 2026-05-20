@@ -110,3 +110,73 @@ async def test_close_is_idempotent_when_glab_mode():
     with patch("link_project_to_chat.gitlab_client._glab_available", return_value=True):
         client = gitlab_client.GitLabClient(pat="")
     await client.close()  # must not raise
+
+
+@pytest.fixture
+def gl_api_client(monkeypatch):
+    """Force httpx (API) mode."""
+    from link_project_to_chat import gitlab_client
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: False)
+    return gitlab_client.GitLabClient(pat="glpat-test123")
+
+
+def _mock_resp(status_code, json_data, headers=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data
+    resp.headers = headers or {}
+    return resp
+
+
+async def test_list_repos_httpx_maps_fields(gl_api_client):
+    projects = [
+        {
+            "path": "my-app",
+            "path_with_namespace": "acme/my-app",
+            "web_url": "https://gitlab.com/acme/my-app",
+            "http_url_to_repo": "https://gitlab.com/acme/my-app.git",
+            "description": "An app",
+            "visibility": "private",
+        },
+        {
+            "path": "lib",
+            "path_with_namespace": "acme/team/lib",
+            "web_url": "https://gitlab.com/acme/team/lib",
+            "http_url_to_repo": "https://gitlab.com/acme/team/lib.git",
+            "description": None,
+            "visibility": "internal",
+        },
+        {
+            "path": "open",
+            "path_with_namespace": "acme/open",
+            "web_url": "https://gitlab.com/acme/open",
+            "http_url_to_repo": "https://gitlab.com/acme/open.git",
+            "description": "",
+            "visibility": "public",
+        },
+    ]
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(200, projects, {"link": ""}))
+        repos, has_next = await gl_api_client.list_repos(page=1, per_page=5)
+    assert [r.full_name for r in repos] == ["acme/my-app", "acme/team/lib", "acme/open"]
+    assert [r.name for r in repos] == ["my-app", "lib", "open"]
+    assert [r.private for r in repos] == [True, True, False]  # internal counts as non-public
+    assert repos[1].description == ""  # None coerced to ""
+    assert has_next is False
+
+
+async def test_list_repos_httpx_detects_next_page(gl_api_client):
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(
+            200, [],
+            {"link": '<https://gitlab.com/api/v4/projects?page=2>; rel="next"'},
+        ))
+        _, has_next = await gl_api_client.list_repos(page=1, per_page=5)
+    assert has_next is True
+
+
+async def test_list_repos_httpx_auth_failure(gl_api_client):
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(401, {"message": "Unauthorized"}))
+        with pytest.raises(Exception, match="GitLab API error 401"):
+            await gl_api_client.list_repos()
