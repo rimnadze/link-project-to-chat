@@ -781,6 +781,7 @@ def start(
             backend_state=proj.backend_state,
             context_enabled=proj.context_enabled,
             context_history_limit=proj.context_history_limit,
+            plugins=getattr(proj, "plugins", None) or None,
             respond_in_groups=proj.respond_in_groups,
             config=config,
         )
