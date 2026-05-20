@@ -171,14 +171,17 @@ async def test_show_repo_page_supports_user_data_key(tmp_path, monkeypatch):
     msg_ref = MessageRef(transport_id="fake", native_id="1", chat=chat)
 
     # Monkeypatch GitHubClient.list_repos to avoid network
+    from link_project_to_chat.repo_provider import RepoInfo
+
     async def fake_list_repos(self, *a, **kw):
-        repo = MagicMock()
-        repo.name = "acme"
-        repo.full_name = "me/acme"
-        repo.description = "example"
-        repo.private = False
-        repo.html_url = "https://github.com/me/acme"
-        repo.clone_url = "https://github.com/me/acme.git"
+        repo = RepoInfo(
+            name="acme",
+            full_name="me/acme",
+            description="example",
+            private=False,
+            html_url="https://github.com/me/acme",
+            clone_url="https://github.com/me/acme.git",
+        )
         return [repo], False
 
     monkeypatch.setattr(
@@ -188,7 +191,8 @@ async def test_show_repo_page_supports_user_data_key(tmp_path, monkeypatch):
     await mb._show_repo_page(msg_ref, ctx, page=1, user_data_key="create_team")
     # Assert the repos landed in ctx.user_data["create_team"], not ["create"]
     assert "repos" in ctx.user_data["create_team"]
-    assert "me/acme" in ctx.user_data["create_team"]["repos"]
+    repos = ctx.user_data["create_team"]["repos"]
+    assert any(r.get("full_name") == "me/acme" for r in repos)
 
 
 @pytest.mark.asyncio

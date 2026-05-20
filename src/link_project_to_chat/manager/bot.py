@@ -2222,14 +2222,18 @@ class ManagerBot(AuthMixin):
         if not repos:
             await self._transport.edit_text(msg, "No repos found.")
             return ConversationHandler.END
-        ctx.user_data[user_data_key]["repos"] = {r.full_name: r.__dict__ for r in repos}
+        ctx.user_data[user_data_key]["repos"] = [r.__dict__ for r in repos]
         ctx.user_data[user_data_key]["page"] = page
+        # Telegram caps callback_data at 64 bytes. GitLab namespaced paths
+        # (with subgroups, or a `-deletion_scheduled-<id>` suffix on projects
+        # awaiting deletion) routinely exceed that, so we encode the repo as
+        # its index in the cached page list rather than its full_name.
         rows: list[list[Button]] = [
             [Button(
                 label=f"{'🔒 ' if r.private else ''}{r.name}",
-                value=f"create_repo_{r.full_name}",
+                value=f"create_repo_{idx}",
             )]
-            for r in repos
+            for idx, r in enumerate(repos)
         ]
         nav: list[Button] = []
         if page > 1:
@@ -2253,12 +2257,16 @@ class ManagerBot(AuthMixin):
             page = int(data.split("_")[-1])
             return await self._show_repo_page(msg_ref, ctx, page, user_data_key=user_data_key)
         elif data.startswith("create_repo_"):
-            full_name = data[len("create_repo_"):]
-            repos = ctx.user_data[user_data_key].get("repos", {})
-            if full_name not in repos:
+            # callback_data carries the index into the cached page list (see
+            # `_show_repo_page`) to stay within Telegram's 64-byte limit.
+            idx_str = data[len("create_repo_"):]
+            repos = ctx.user_data[user_data_key].get("repos", [])
+            try:
+                idx = int(idx_str)
+                repo_data = repos[idx]
+            except (ValueError, IndexError, TypeError):
                 await self._transport.edit_text(msg_ref, "Repo not found. Try again.")
                 return ConversationHandler.END
-            repo_data = repos[full_name]
             ctx.user_data[user_data_key]["repo"] = repo_data
             suggested_name = repo_data["name"]
             ctx.user_data[user_data_key]["suggested_name"] = suggested_name

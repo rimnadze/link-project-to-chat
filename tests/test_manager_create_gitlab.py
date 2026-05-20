@@ -944,12 +944,14 @@ async def test_e2e_create_project_with_gitlab(tmp_path, monkeypatch):
     state = await bot._create_source_callback(source, ctx)
     fake_client.list_repos.assert_awaited()
     assert state == ManagerBot.CREATE_REPO_LIST
-    # The repos dict was cached in user_data for the pick step.
-    assert "acme/my-app" in ctx.user_data["create"]["repos"]
+    # The repos list was cached in user_data for the pick step.
+    assert any(
+        r["full_name"] == "acme/my-app" for r in ctx.user_data["create"]["repos"]
+    )
 
-    # Step 3: repo pick → "create_repo_acme/my-app". Should land on CREATE_NAME
-    # and have stored the repo on ctx.user_data["create"]["repo"].
-    repo_pick = _make_button_update("create_repo_acme/my-app")
+    # Step 3: repo pick → index 0 in the cached page. Should land on
+    # CREATE_NAME and have stored the repo on ctx.user_data["create"]["repo"].
+    repo_pick = _make_button_update("create_repo_0")
     state = await bot._create_repo_list_callback(repo_pick, ctx)
     assert state == ManagerBot.CREATE_NAME
     assert ctx.user_data["create"]["repo"]["full_name"] == "acme/my-app"
@@ -1022,10 +1024,10 @@ async def test_e2e_create_project_with_github_still_works(tmp_path, monkeypatch)
     state = await bot._create_source_callback(source, ctx)
     fake_client.list_repos.assert_awaited()
     assert state == ManagerBot.CREATE_REPO_LIST
-    assert "u/r" in ctx.user_data["create"]["repos"]
+    assert any(r["full_name"] == "u/r" for r in ctx.user_data["create"]["repos"])
 
-    # Step 3: pick the repo.
-    repo_pick = _make_button_update("create_repo_u/r")
+    # Step 3: pick the repo by index.
+    repo_pick = _make_button_update("create_repo_0")
     state = await bot._create_repo_list_callback(repo_pick, ctx)
     assert state == ManagerBot.CREATE_NAME
     assert ctx.user_data["create"]["repo"]["full_name"] == "u/r"
@@ -1118,11 +1120,14 @@ async def test_e2e_create_team_with_gitlab(tmp_path, monkeypatch):
     state = await bot._create_team_source_callback(source, ctx)
     fake_client.list_repos.assert_awaited()
     assert state == ManagerBot.CREATE_TEAM_REPO_LIST
-    assert "acme/my-app" in ctx.user_data["create_team"]["repos"]
+    assert any(
+        r["full_name"] == "acme/my-app"
+        for r in ctx.user_data["create_team"]["repos"]
+    )
 
-    # Step 3: repo pick → "create_repo_acme/my-app". Team flow lands on
-    # CREATE_TEAM_NAME (not the project's CREATE_NAME) and stores the repo.
-    repo_pick = _make_button_update("create_repo_acme/my-app")
+    # Step 3: repo pick → index 0. Team flow lands on CREATE_TEAM_NAME (not
+    # the project's CREATE_NAME) and stores the repo.
+    repo_pick = _make_button_update("create_repo_0")
     state = await bot._create_repo_list_callback(
         repo_pick, ctx, user_data_key="create_team",
     )
@@ -1182,3 +1187,74 @@ async def test_e2e_create_team_with_gitlab(tmp_path, monkeypatch):
     assert "repos" in str(call_dest)
     assert "myteam" in str(call_dest)
     fake_client.close.assert_awaited()
+
+
+# ─── Telegram 64-byte callback_data limit on repo-picker buttons ───────────
+
+
+async def test_show_repo_page_callback_data_fits_telegram_64_byte_limit(
+    tmp_path, monkeypatch,
+):
+    """Telegram caps callback_data at 64 bytes. GitLab namespaced paths can
+    exceed 64 chars on their own (subgroups, deletion-scheduled suffixes).
+
+    The repo picker must use a compact identifier (index) in callback_data,
+    not full_name — otherwise long GitLab paths (e.g. ones with a
+    ``-deletion_scheduled-<id>`` suffix tacked on by GitLab when a project
+    is awaiting deletion) blow the 64-byte limit and Telegram rejects the
+    keyboard with ``Button_data_invalid``.
+    """
+    import json
+    from unittest.mock import AsyncMock
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"gitlab_pat": "glpat-x", "gitlab_host": "gitlab.com"}))
+    bot = _make_e2e_manager_bot(cfg)
+
+    long_repos = [
+        RepoInfo(
+            name="link-project-to-chat-deletion_scheduled-82372719",
+            full_name=(
+                "rezochikashua/link-project-to-chat-deletion_scheduled-82372719"
+            ),
+            html_url=(
+                "https://gitlab.com/rezochikashua/"
+                "link-project-to-chat-deletion_scheduled-82372719"
+            ),
+            clone_url=(
+                "https://gitlab.com/rezochikashua/"
+                "link-project-to-chat-deletion_scheduled-82372719.git"
+            ),
+            description="",
+            private=False,
+        ),
+    ]
+    fake_client = MagicMock()
+    fake_client.list_repos = AsyncMock(return_value=(long_repos, False))
+    fake_client.close = AsyncMock()
+    monkeypatch.setattr(
+        "link_project_to_chat.gitlab_client.GitLabClient",
+        lambda **kw: fake_client,
+    )
+
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg), "provider": "gitlab"}}
+
+    await bot._show_repo_page(_fake_message_ref(), ctx, page=1)
+
+    edited = bot._transport.edited_messages[-1]
+    payloads = [
+        btn.value
+        for row in edited.buttons.rows
+        for btn in row
+        if getattr(btn, "value", None)
+    ]
+    assert payloads, "no buttons rendered"
+    for payload in payloads:
+        assert len(payload.encode("utf-8")) <= 64, (
+            f"callback_data {payload!r} is "
+            f"{len(payload.encode('utf-8'))} bytes, "
+            "exceeds Telegram's 64-byte limit"
+        )
