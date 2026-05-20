@@ -67,6 +67,11 @@ def _repo_info_from_project(p: dict) -> RepoInfo:
     )
 
 
+def _gitlab_url_re(host: str) -> "re.Pattern[str]":
+    """Compile a per-host URL regex. Supports subgroups via the multi-segment capture."""
+    return re.compile(rf"https?://{re.escape(host)}/((?:[^/\s]+/)+?[^/\s]+?)(?:\.git)?/?$")
+
+
 def _redact_secrets(text: str, *secrets: str, host: str) -> str:
     """Strip raw PATs, their base64 forms, and credential-URL forms from text."""
     redacted = text
@@ -141,6 +146,31 @@ class GitLabClient:
         has_next = 'rel="next"' in headers_part
         repos = [_repo_info_from_project(p) for p in json.loads(body_part)]
         return repos, has_next
+
+    async def validate_repo_url(self, url: str) -> RepoInfo | None:
+        match = _gitlab_url_re(self._host).match(url.strip())
+        if not match:
+            return None
+        full_path = match.group(1)
+        if self._use_glab:
+            return await self._validate_glab(full_path)
+        return await self._validate_api(full_path)
+
+    async def _validate_api(self, full_path: str) -> RepoInfo | None:
+        from urllib.parse import quote
+        encoded = quote(full_path, safe="")
+        resp = await self._client.get(f"/projects/{encoded}")
+        if resp.status_code != 200:
+            return None
+        return _repo_info_from_project(resp.json())
+
+    async def _validate_glab(self, full_path: str) -> RepoInfo | None:
+        from urllib.parse import quote
+        encoded = quote(full_path, safe="")
+        code, stdout, stderr = await _run_glab("api", f"projects/{encoded}")
+        if code != 0:
+            return None
+        return _repo_info_from_project(json.loads(stdout))
 
     async def close(self) -> None:
         if self._client:

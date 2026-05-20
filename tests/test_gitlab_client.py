@@ -228,3 +228,85 @@ async def test_list_repos_glab_failure_raises(gl_glab_client):
                AsyncMock(return_value=(1, "", "auth error"))):
         with pytest.raises(Exception, match="glab api .* failed"):
             await gl_glab_client.list_repos()
+
+
+async def test_validate_repo_url_gitlab_com(gl_api_client):
+    project = {
+        "path": "myproj",
+        "path_with_namespace": "owner/myproj",
+        "web_url": "https://gitlab.com/owner/myproj",
+        "http_url_to_repo": "https://gitlab.com/owner/myproj.git",
+        "description": "ok",
+        "visibility": "private",
+    }
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(200, project))
+        info = await gl_api_client.validate_repo_url("https://gitlab.com/owner/myproj")
+    assert info is not None
+    assert info.full_name == "owner/myproj"
+    call = mock_client.get.await_args
+    assert "projects/owner%2Fmyproj" in call.args[0]
+
+
+async def test_validate_repo_url_subgroup(gl_api_client):
+    project = {
+        "path": "leaf",
+        "path_with_namespace": "group/sub1/sub2/leaf",
+        "web_url": "https://gitlab.com/group/sub1/sub2/leaf",
+        "http_url_to_repo": "https://gitlab.com/group/sub1/sub2/leaf.git",
+        "description": "",
+        "visibility": "internal",
+    }
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(200, project))
+        info = await gl_api_client.validate_repo_url(
+            "https://gitlab.com/group/sub1/sub2/leaf"
+        )
+    assert info is not None
+    assert info.full_name == "group/sub1/sub2/leaf"
+    call = mock_client.get.await_args
+    assert "projects/group%2Fsub1%2Fsub2%2Fleaf" in call.args[0]
+
+
+async def test_validate_repo_url_self_hosted(monkeypatch):
+    from link_project_to_chat import gitlab_client
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: False)
+    client = gitlab_client.GitLabClient(pat="glpat-x", host="gitlab.example.com")
+    project = {
+        "path": "p",
+        "path_with_namespace": "g/p",
+        "web_url": "https://gitlab.example.com/g/p",
+        "http_url_to_repo": "https://gitlab.example.com/g/p.git",
+        "description": "",
+        "visibility": "private",
+    }
+    with patch.object(client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(200, project))
+        info = await client.validate_repo_url("https://gitlab.example.com/g/p")
+    assert info is not None
+    assert info.html_url == "https://gitlab.example.com/g/p"
+
+
+async def test_validate_repo_url_rejects_github(gl_api_client):
+    info = await gl_api_client.validate_repo_url("https://github.com/owner/repo")
+    assert info is None
+
+
+async def test_validate_repo_url_rejects_wrong_host(monkeypatch):
+    from link_project_to_chat import gitlab_client
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: False)
+    client = gitlab_client.GitLabClient(pat="glpat-x", host="gitlab.example.com")
+    info = await client.validate_repo_url("https://gitlab.com/owner/repo")
+    assert info is None
+
+
+async def test_validate_repo_url_rejects_bare_path(gl_api_client):
+    info = await gl_api_client.validate_repo_url("not-a-url")
+    assert info is None
+
+
+async def test_validate_repo_url_not_found(gl_api_client):
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(404, {"message": "Not Found"}))
+        info = await gl_api_client.validate_repo_url("https://gitlab.com/x/y")
+    assert info is None
