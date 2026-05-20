@@ -28,24 +28,42 @@ logger = logging.getLogger(__name__)
 
 
 def _glab_available(host: str = "gitlab.com") -> bool:
-    """Check if glab CLI is installed and authenticated."""
+    """Check if glab CLI is installed AND its token is currently accepted by GitLab.
+
+    `glab auth status` exits 0 even when the stored token has been revoked, so
+    we hit `/api/user` instead — it returns a user object on success and a JSON
+    error body (still exit 0) on rejection, which we can distinguish.
+    """
     glab_path = shutil.which("glab")
     if glab_path is None:
         return False
-    cmd = [glab_path, "auth", "status"]
+    cmd = [glab_path, "api"]
     if host != "gitlab.com":
         cmd.extend(["--hostname", host])
+    cmd.append("user")
     try:
         proc = subprocess.run(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             check=False,
-            timeout=5,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        return False
+    # Even on exit 0, glab may have written an error JSON to stdout (e.g.
+    # {"message": "401 ..."}). The /api/user endpoint returns an object with
+    # "id" / "username" on success.
+    try:
+        body = proc.stdout.decode("utf-8", errors="replace").strip()
+        if not body:
+            return False
+        parsed = json.loads(body)
+        return isinstance(parsed, dict) and ("id" in parsed or "username" in parsed)
+    except (ValueError, json.JSONDecodeError):
+        return False
 
 
 async def _run_glab(*args: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:

@@ -17,7 +17,7 @@ def test_glab_available_when_not_on_path():
 
 def test_glab_available_when_not_authenticated():
     from link_project_to_chat import gitlab_client
-    fake_proc = MagicMock(returncode=1)
+    fake_proc = MagicMock(returncode=1, stdout=b"", stderr=b"not logged in")
     with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
          patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
         assert gitlab_client._glab_available() is False
@@ -25,7 +25,7 @@ def test_glab_available_when_not_authenticated():
 
 def test_glab_available_when_ready():
     from link_project_to_chat import gitlab_client
-    fake_proc = MagicMock(returncode=0)
+    fake_proc = MagicMock(returncode=0, stdout=b'{"id": 1, "username": "u"}', stderr=b"")
     with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
          patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
         assert gitlab_client._glab_available() is True
@@ -34,14 +34,50 @@ def test_glab_available_when_ready():
 def test_glab_available_checks_specific_host():
     from link_project_to_chat import gitlab_client
 
-    fake_proc = MagicMock(returncode=0)
+    fake_proc = MagicMock(returncode=0, stdout=b'{"id": 1, "username": "u"}', stderr=b"")
     with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
          patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc) as mock_run:
         assert gitlab_client._glab_available(host="gitlab.example.com") is True
 
     assert mock_run.call_args.args[0] == [
-        "/usr/bin/glab", "auth", "status", "--hostname", "gitlab.example.com",
+        "/usr/bin/glab", "api", "--hostname", "gitlab.example.com", "user",
     ]
+
+
+def test_glab_available_returns_false_when_api_user_returns_dict_message():
+    """Invalid token: `glab api user` exits 0 but body is {'message': '401 ...'}.
+    Must return False so the httpx fallback kicks in."""
+    from link_project_to_chat import gitlab_client
+    fake_proc = MagicMock(returncode=0, stdout=b'{"message": "401 Unauthorized"}', stderr=b"")
+    with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
+         patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
+        assert gitlab_client._glab_available() is False
+
+
+def test_glab_available_returns_true_when_api_user_returns_user_object():
+    """Valid token: `glab api user` returns {'id': 123, 'username': '...'}. Must return True."""
+    from link_project_to_chat import gitlab_client
+    fake_proc = MagicMock(returncode=0, stdout=b'{"id": 42, "username": "alice"}', stderr=b"")
+    with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
+         patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
+        assert gitlab_client._glab_available() is True
+
+
+def test_glab_available_returns_false_when_api_user_empty_stdout():
+    from link_project_to_chat import gitlab_client
+    fake_proc = MagicMock(returncode=0, stdout=b"", stderr=b"")
+    with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
+         patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
+        assert gitlab_client._glab_available() is False
+
+
+def test_glab_available_returns_false_on_nonzero_exit():
+    """No regression on the obvious case."""
+    from link_project_to_chat import gitlab_client
+    fake_proc = MagicMock(returncode=1, stdout=b"", stderr=b"not logged in")
+    with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
+         patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc):
+        assert gitlab_client._glab_available() is False
 
 
 def test_redact_secrets_redacts_raw_pat():
