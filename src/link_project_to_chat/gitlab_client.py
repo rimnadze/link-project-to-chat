@@ -190,6 +190,18 @@ class GitLabClient:
             return None
         return _repo_info_from_project(json.loads(stdout))
 
+    async def _clone_glab(self, repo: RepoInfo, dest: Path) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "glab", "repo", "clone", repo.full_name, str(dest),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise Exception(
+                "glab repo clone failed: "
+                + _redact_secrets(stderr.decode().strip(), self._pat, host=self._host)
+            )
+
     async def clone_repo(self, repo: RepoInfo, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if self._use_glab:

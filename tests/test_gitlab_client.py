@@ -392,3 +392,42 @@ async def test_clone_repo_api_mode_uses_self_hosted_host_in_git_config(
 
     env = mock_exec.await_args.kwargs["env"]
     assert env["GIT_CONFIG_KEY_0"] == "http.https://gitlab.example.com/.extraHeader"
+
+
+async def test_clone_repo_glab_mode_uses_full_name(gl_glab_client, tmp_path: Path):
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    repo = RepoInfo(
+        name="p", full_name="group/sub/p",
+        html_url="https://gitlab.com/group/sub/p",
+        clone_url="https://gitlab.com/group/sub/p.git",
+        description="", private=True,
+    )
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(0)),
+    ) as mock_exec:
+        await gl_glab_client.clone_repo(repo, tmp_path / "p")
+
+    args = mock_exec.await_args.args
+    assert args[0] == "glab"
+    assert args[1:3] == ("repo", "clone")
+    assert args[3] == "group/sub/p"
+    assert args[4] == str(tmp_path / "p")
+
+
+async def test_clone_repo_glab_mode_failure_raises(gl_glab_client, tmp_path: Path):
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    repo = RepoInfo(
+        name="p", full_name="u/p",
+        html_url="https://gitlab.com/u/p",
+        clone_url="https://gitlab.com/u/p.git",
+        description="", private=True,
+    )
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(1, stderr=b"glab: permission denied")),
+    ):
+        with pytest.raises(Exception, match="glab repo clone failed"):
+            await gl_glab_client.clone_repo(repo, tmp_path / "p")
