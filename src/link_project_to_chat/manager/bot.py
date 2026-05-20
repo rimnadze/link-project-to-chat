@@ -24,6 +24,7 @@ from .._auth import AuthMixin
 from ..transport import Button, Buttons, ChatRef, MessageRef
 
 if TYPE_CHECKING:
+    from ..repo_provider import RepoProvider
     from ..transport import ButtonClick, CommandInvocation, IncomingMessage
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,27 @@ async def _create_bot_with_retry(
             continue
         attempt += 1
     raise RuntimeError(f"Bot username unavailable after {max_attempts} attempts (base={base_username})")
+
+
+# ConversationHandler state for the GitLab provider picker. Shared between the
+# /create_project and /create_team wizards: each ConversationHandler is scoped
+# per-handler, so a single state int suffices.
+STATE_CREATE_PROVIDER_PICK = 25
+
+
+def _build_repo_provider(ctx, config) -> "RepoProvider":
+    """Construct a RepoProvider from the wizard's stored provider choice.
+
+    Reads ``ctx.user_data["create"]["provider"]`` — set by the new
+    STATE_CREATE_PROVIDER_PICK callback. Defaults to GitHub when the field
+    is missing (legacy callers).
+    """
+    provider = ctx.user_data.get("create", {}).get("provider", "github")
+    if provider == "gitlab":
+        from ..gitlab_client import GitLabClient
+        return GitLabClient(pat=config.gitlab_pat, host=config.gitlab_host)
+    from ..github_client import GitHubClient
+    return GitHubClient(pat=config.github_pat)
 
 
 class ManagerBot(AuthMixin):
