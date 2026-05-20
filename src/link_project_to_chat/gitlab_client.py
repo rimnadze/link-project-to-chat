@@ -92,18 +92,22 @@ def _repo_info_from_project(p: dict) -> RepoInfo:
 def _git_auth_env(pat: str, host: str) -> dict[str, str]:
     """Inject a one-shot GitLab auth header via env, not argv.
 
-    Uses ``Authorization: Bearer {pat}`` (GitLab convention). The GitHub
-    equivalent uses ``basic`` with a base64'd ``x-access-token:{pat}`` pair —
-    these MUST differ.
+    GitLab smart HTTP expects token auth through the same shape as username /
+    password credentials. Use a non-empty username and the PAT as password,
+    then clear credential helpers so a rejected token does not trigger a global
+    `glab` helper and obscure the real clone error.
     """
     env = os.environ.copy()
     try:
         count = int(env.get("GIT_CONFIG_COUNT", "0"))
     except ValueError:
         count = 0
-    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    auth = base64.b64encode(f"oauth2:{pat}".encode()).decode()
+    env["GIT_CONFIG_COUNT"] = str(count + 2)
     env[f"GIT_CONFIG_KEY_{count}"] = f"http.https://{host}/.extraHeader"
-    env[f"GIT_CONFIG_VALUE_{count}"] = f"AUTHORIZATION: Bearer {pat}"
+    env[f"GIT_CONFIG_VALUE_{count}"] = f"AUTHORIZATION: Basic {auth}"
+    env[f"GIT_CONFIG_KEY_{count + 1}"] = "credential.helper"
+    env[f"GIT_CONFIG_VALUE_{count + 1}"] = ""
     return env
 
 
@@ -119,8 +123,9 @@ def _redact_secrets(text: str, *secrets: str, host: str) -> str:
         if not secret:
             continue
         redacted = redacted.replace(secret, "[REDACTED]")
-        encoded = base64.b64encode(f"x-access-token:{secret}".encode()).decode()
-        redacted = redacted.replace(encoded, "[REDACTED]")
+        for username in ("x-access-token", "oauth2"):
+            encoded = base64.b64encode(f"{username}:{secret}".encode()).decode()
+            redacted = redacted.replace(encoded, "[REDACTED]")
     cred_url_re = re.compile(rf"https://[^/@\s]+@{re.escape(host)}")
     redacted = cred_url_re.sub(f"https://[REDACTED]@{host}", redacted)
     return redacted

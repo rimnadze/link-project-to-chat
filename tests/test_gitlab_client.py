@@ -88,12 +88,23 @@ def test_redact_secrets_redacts_raw_pat():
 
 
 def test_redact_secrets_redacts_base64_form():
-    """Defense-in-depth: redact base64(x-access-token:PAT) even though GitLab uses Bearer."""
+    """Defense-in-depth: redact base64(x-access-token:PAT)."""
     import base64
     from link_project_to_chat.gitlab_client import _redact_secrets
     encoded = base64.b64encode(b"x-access-token:glpat-abc").decode()
     out = _redact_secrets(f"leak: {encoded}", "glpat-abc", host="gitlab.com")
     assert encoded not in out
+
+
+def test_redact_secrets_redacts_gitlab_basic_auth_base64_form():
+    import base64
+    from link_project_to_chat.gitlab_client import _redact_secrets
+
+    encoded = base64.b64encode(b"oauth2:glpat-abc").decode()
+    out = _redact_secrets(f"fatal: header {encoded}", "glpat-abc", host="gitlab.com")
+
+    assert encoded not in out
+    assert "[REDACTED]" in out
 
 
 def test_redact_secrets_redacts_credential_url_default_host():
@@ -488,9 +499,10 @@ class _FakeProc:
         return self._stdout, self._stderr
 
 
-async def test_clone_repo_api_mode_injects_bearer_via_git_config(
+async def test_clone_repo_api_mode_injects_basic_auth_via_git_config(
     gl_api_client, tmp_path: Path,
 ):
+    import base64
     from link_project_to_chat.repo_provider import RepoInfo
 
     repo = RepoInfo(
@@ -510,9 +522,14 @@ async def test_clone_repo_api_mode_injects_bearer_via_git_config(
     assert args[:3] == ("git", "clone", "https://gitlab.com/u/p.git")
     assert all("glpat-test123" not in str(a) for a in args)
     env = kwargs["env"]
-    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_COUNT"] == "2"
     assert env["GIT_CONFIG_KEY_0"] == "http.https://gitlab.com/.extraHeader"
-    assert env["GIT_CONFIG_VALUE_0"] == "AUTHORIZATION: Bearer glpat-test123"
+    assert env["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: Basic ")
+    assert "Bearer" not in env["GIT_CONFIG_VALUE_0"]
+    encoded = env["GIT_CONFIG_VALUE_0"].removeprefix("AUTHORIZATION: Basic ")
+    assert base64.b64decode(encoded).decode() == "oauth2:glpat-test123"
+    assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+    assert env["GIT_CONFIG_VALUE_1"] == ""
 
 
 async def test_clone_repo_api_mode_redacts_pat_in_errors(gl_api_client, tmp_path: Path):
@@ -557,6 +574,8 @@ async def test_clone_repo_api_mode_uses_self_hosted_host_in_git_config(
 
     env = mock_exec.await_args.kwargs["env"]
     assert env["GIT_CONFIG_KEY_0"] == "http.https://gitlab.example.com/.extraHeader"
+    assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+    assert env["GIT_CONFIG_VALUE_1"] == ""
 
 
 async def test_clone_repo_glab_mode_uses_full_name(gl_glab_client, tmp_path: Path):
