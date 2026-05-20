@@ -1777,4 +1777,6 @@ def test_configure_rejects_gitlab_host_with_scheme(tmp_path):
     )
     assert result.exit_code != 0
     output = (result.output + (result.stderr or "")).lower()
-    assert "scheme" in output or "host" in output
+    # "host" is in the flag name (--gitlab-host) so a bare "host" check would
+    # match vacuously; require the actual error-message keywords instead.
+    assert "bare hostname" in output or "scheme" in output

@@ -415,14 +415,19 @@ def configure(
         else:
             click.echo(f"Cleared {transport!r} identities for {norm}.")
 
+    # Accumulate the remaining flag mutations and save once at the end.
+    # The user-management blocks above already saved per-action; the flags
+    # below (manager token, gitlab credentials) batch into a single write.
+    changed = False
+
     if manager_token:
         config.manager_telegram_bot_token = manager_token
         click.echo(f"Configured manager token: ***{manager_token[-4:]}")
-        save_config(config, cfg_path)
+        changed = True
 
     if gitlab_pat is not None:
         config.gitlab_pat = gitlab_pat
-        save_config(config, cfg_path)
+        changed = True
         click.echo("GitLab PAT saved.")
 
     if gitlab_host is not None:
@@ -432,8 +437,11 @@ def configure(
                 "no scheme, no path."
             )
         config.gitlab_host = gitlab_host.rstrip("/")
-        save_config(config, cfg_path)
+        changed = True
         click.echo(f"GitLab host set to {config.gitlab_host}.")
+
+    if changed:
+        save_config(config, cfg_path)
 
 
 @main.command()
