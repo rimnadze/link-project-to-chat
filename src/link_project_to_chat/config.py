@@ -483,6 +483,8 @@ class TeamConfig:
 @dataclass
 class Config:
     github_pat: str = ""
+    gitlab_pat: str = ""
+    gitlab_host: str = "gitlab.com"
     telegram_api_id: int = 0
     telegram_api_hash: str = ""
     manager_telegram_bot_token: str = ""
@@ -1142,6 +1144,8 @@ def _load_config_unlocked(
             )
             config.meta_dir = DEFAULT_META_DIR
         config.github_pat = raw.get("github_pat", "")
+        config.gitlab_pat = raw.get("gitlab_pat", "")
+        config.gitlab_host = raw.get("gitlab_host", "gitlab.com")
         config.telegram_api_id = raw.get("telegram_api_id", 0)
         config.telegram_api_hash = raw.get("telegram_api_hash", "")
         # Support old name for backward compatibility
@@ -1408,6 +1412,14 @@ def _save_config_unlocked(config: Config, path: Path) -> None:
         raw["github_pat"] = config.github_pat
     else:
         raw.pop("github_pat", None)
+    if config.gitlab_pat:
+        raw["gitlab_pat"] = config.gitlab_pat
+    else:
+        raw.pop("gitlab_pat", None)
+    if config.gitlab_host and config.gitlab_host != "gitlab.com":
+        raw["gitlab_host"] = config.gitlab_host
+    else:
+        raw.pop("gitlab_host", None)
     if config.telegram_api_id:
         raw["telegram_api_id"] = config.telegram_api_id
     else:

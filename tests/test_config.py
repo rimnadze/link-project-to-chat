@@ -1246,3 +1246,49 @@ def test_migration_skips_when_multiple_projects_no_overrides(tmp_path):
     assert loaded.projects["b"].google_chat is None
     # The top-level block is preserved, the operator will use the wizard to claim.
     assert loaded.google_chat.port == 8090
+
+
+def test_gitlab_pat_round_trips(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"gitlab_pat": "glpat-secret"}))
+    config = load_config(cfg_file)
+    assert config.gitlab_pat == "glpat-secret"
+    save_config(config, cfg_file)
+    raw = json.loads(cfg_file.read_text())
+    assert raw["gitlab_pat"] == "glpat-secret"
+
+
+def test_gitlab_host_defaults_to_gitlab_com(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({}))
+    config = load_config(cfg_file)
+    assert config.gitlab_host == "gitlab.com"
+
+
+def test_gitlab_host_default_is_omitted_from_saved_json(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({}))
+    config = load_config(cfg_file)
+    save_config(config, cfg_file)
+    raw = json.loads(cfg_file.read_text())
+    assert "gitlab_host" not in raw
+
+
+def test_gitlab_host_custom_is_persisted(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"gitlab_host": "gitlab.example.com"}))
+    config = load_config(cfg_file)
+    assert config.gitlab_host == "gitlab.example.com"
+    save_config(config, cfg_file)
+    raw = json.loads(cfg_file.read_text())
+    assert raw["gitlab_host"] == "gitlab.example.com"
+
+
+def test_empty_gitlab_pat_is_omitted_from_saved_json(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({}))
+    config = load_config(cfg_file)
+    assert config.gitlab_pat == ""
+    save_config(config, cfg_file)
+    raw = json.loads(cfg_file.read_text())
+    assert "gitlab_pat" not in raw
