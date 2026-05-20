@@ -328,7 +328,7 @@ async def test_finalize_add_gchat_persist_failure_preserves_wizard_state(
     # User must see an error message.
     assert mb._transport.sent_messages
     last = mb._transport.sent_messages[-1].text.lower()
-    assert "error" in last or "fail" in last
+    assert "could not" in last or "error" in last or "fail" in last
 
 
 @pytest.mark.asyncio
@@ -360,7 +360,7 @@ async def test_finalize_edit_gchat_persist_failure_preserves_wizard_state(
     assert "gchat_wizard" in ctx.user_data
     assert mb._transport.sent_messages
     last = mb._transport.sent_messages[-1].text.lower()
-    assert "error" in last or "fail" in last
+    assert "could not" in last or "error" in last or "fail" in last
 
 
 @pytest.mark.asyncio

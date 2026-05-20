@@ -1799,13 +1799,12 @@ class ManagerBot(AuthMixin):
         """Persist the override, start the subprocess, print the nginx snippet."""
         name = wizard["name"]
         data = wizard["data"]
-        ctx.user_data.pop("gchat_wizard", None)
 
-        # Persist the override atomically via _patch_json: load → mutate
-        # one project entry → save, all under _config_lock. Using the
-        # dict-based path matches the rest of the manager (_save_projects,
-        # set_project_autostart, etc.) and avoids the heavier dataclass
-        # round-trip that _load_config → save_config would do.
+        # Finding 3: PERSIST FIRST, then pop wizard state. The legacy order
+        # discarded the wizard data before _patch_json could surface a disk
+        # error / missing-project case — the operator was left with no error
+        # message AND no way to retry. Now we only clear the wizard on a
+        # confirmed write.
         from ..config import _patch_json
         cfg_path = self._project_config_path or DEFAULT_CONFIG
         gchat_block = {
@@ -1819,10 +1818,25 @@ class ManagerBot(AuthMixin):
             projects = raw.setdefault("projects", {})
             project = projects.get(name)
             if not isinstance(project, dict):
-                return
+                # Explicit raise so the caller can tell the operator instead
+                # of silently no-op'ing — the project disappeared between
+                # wizard start and finalize.
+                raise KeyError(f"Project '{name}' not found in config")
             project["google_chat"] = gchat_block
 
-        _patch_json(_patch, cfg_path)
+        try:
+            _patch_json(_patch, cfg_path)
+        except Exception as exc:
+            # Keep wizard state alive so the operator can retry — and tell
+            # them what went wrong instead of dropping the failure on the floor.
+            await self._transport.send_text(
+                chat,
+                f"Could not save Google Chat override for '{name}': {exc}",
+            )
+            return
+
+        # Persist succeeded — now safe to clear wizard state.
+        ctx.user_data.pop("gchat_wizard", None)
 
         # Start the subprocess. Returns False if the project disappeared
         # or the config is unresolvable; report either way.
@@ -1893,8 +1907,9 @@ class ManagerBot(AuthMixin):
         """Persist the (possibly partially updated) override and restart the bot."""
         name = wizard["name"]
         data = wizard["data"]
-        ctx.user_data.pop("gchat_wizard", None)
 
+        # Finding 3: PERSIST FIRST, then pop wizard state — same reasoning
+        # as _finalize_add_google_chat_wizard.
         from ..config import _patch_json
         cfg_path = self._project_config_path or DEFAULT_CONFIG
         gchat_block = {
@@ -1908,10 +1923,20 @@ class ManagerBot(AuthMixin):
             projects = raw.setdefault("projects", {})
             project = projects.get(name)
             if not isinstance(project, dict):
-                return
+                raise KeyError(f"Project '{name}' not found in config")
             project["google_chat"] = gchat_block
 
-        _patch_json(_patch, cfg_path)
+        try:
+            _patch_json(_patch, cfg_path)
+        except Exception as exc:
+            await self._transport.send_text(
+                chat,
+                f"Could not save Google Chat override for '{name}': {exc}",
+            )
+            return
+
+        # Persist succeeded — now safe to clear wizard state.
+        ctx.user_data.pop("gchat_wizard", None)
 
         restarted = self._pm.restart_google_chat_subprocess(name)
         status_line = (
