@@ -64,3 +64,49 @@ def test_redact_secrets_redacts_credential_url_self_hosted():
     )
     assert "glpat-x" not in out
     assert "[REDACTED]@gitlab.example.com" in out
+
+
+def test_init_prefers_api_mode_when_pat_set():
+    """With a PAT and httpx available, prefer the API path even if glab is auth'd."""
+    from link_project_to_chat import gitlab_client
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=True):
+        client = gitlab_client.GitLabClient(pat="glpat-test")
+    assert client._use_glab is False
+    assert client._client is not None
+
+
+def test_init_uses_glab_when_no_pat_and_glab_available():
+    from link_project_to_chat import gitlab_client
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=True):
+        client = gitlab_client.GitLabClient(pat="")
+    assert client._use_glab is True
+    assert client._client is None
+
+
+def test_init_raises_when_no_pat_and_no_glab():
+    from link_project_to_chat import gitlab_client
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=False):
+        with pytest.raises(ValueError, match="GitLab PAT required"):
+            gitlab_client.GitLabClient(pat="")
+
+
+def test_init_raises_when_no_httpx_and_no_glab(monkeypatch):
+    from link_project_to_chat import gitlab_client
+    monkeypatch.setattr(gitlab_client, "httpx", None)
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=False):
+        with pytest.raises(ImportError, match="Neither glab CLI nor httpx"):
+            gitlab_client.GitLabClient(pat="glpat-test")
+
+
+def test_init_custom_host_used_for_api_base_url():
+    from link_project_to_chat import gitlab_client
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=False):
+        client = gitlab_client.GitLabClient(pat="glpat-test", host="gitlab.example.com")
+    assert str(client._client.base_url).rstrip("/") == "https://gitlab.example.com/api/v4"
+
+
+async def test_close_is_idempotent_when_glab_mode():
+    from link_project_to_chat import gitlab_client
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=True):
+        client = gitlab_client.GitLabClient(pat="")
+    await client.close()  # must not raise

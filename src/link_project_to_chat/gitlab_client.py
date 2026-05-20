@@ -67,3 +67,32 @@ def _redact_secrets(text: str, *secrets: str, host: str) -> str:
     cred_url_re = re.compile(rf"https://[^/@\s]+@{re.escape(host)}")
     redacted = cred_url_re.sub(f"https://[REDACTED]@{host}", redacted)
     return redacted
+
+
+class GitLabClient:
+    """GitLab client that uses glab CLI if available, falls back to PAT + httpx."""
+
+    def __init__(self, pat: str = "", host: str = "gitlab.com"):
+        self._pat = pat
+        self._host = host
+        prefer_api = bool(pat) and httpx is not None
+        self._use_glab = _glab_available() and not prefer_api
+        self._client = None
+        if not self._use_glab:
+            if httpx is None:
+                raise ImportError(
+                    "Neither glab CLI nor httpx available. "
+                    "Install glab (https://gitlab.com/gitlab-org/cli) or run: "
+                    "pip install link-project-to-chat[create]"
+                )
+            if not pat:
+                raise ValueError("GitLab PAT required when glab CLI is not available.")
+            self._client = httpx.AsyncClient(
+                base_url=f"https://{host}/api/v4",
+                headers={"PRIVATE-TOKEN": pat},
+                timeout=30.0,
+            )
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
