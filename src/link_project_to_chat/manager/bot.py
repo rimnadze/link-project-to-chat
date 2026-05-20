@@ -308,6 +308,22 @@ async def _safe_disconnect_bfc(bfc) -> None:
         logger.warning("BotFather client disconnect failed: %s", exc)
 
 
+_TEAM_SESSION_LOST_MESSAGE = "Session expired — please /create_team again."
+
+
+def _team_session_or_none(ctx) -> dict | None:
+    """Return ``ctx.user_data['create_team']`` if it looks usable, else None.
+
+    Used by the team-flow callbacks (Finding 6) to bail out cleanly when the
+    wizard state has been dropped (PTB cleanup, restart, /cancel raced with
+    an inflight callback) instead of KeyError-ing inside the handler with no
+    user feedback."""
+    data = ctx.user_data.get("create_team")
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 def _load_config_or_error(cfg_path: Path):
     """Helper: try load_config(cfg_path). Returns (config, None) on success
     or (None, error_text) on failure. Lets handlers surface configuration
@@ -2494,6 +2510,13 @@ class ManagerBot(AuthMixin):
 
     async def _create_team_name(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         incoming = self._incoming_from_update(update)
+        # Finding 6: bail cleanly when wizard state has been dropped.
+        data = _team_session_or_none(ctx)
+        if data is None:
+            await self._transport.send_text(
+                incoming.chat, _TEAM_SESSION_LOST_MESSAGE,
+            )
+            return ConversationHandler.END
         prefix = incoming.text.strip().lower()
         if not prefix.isidentifier() or not prefix.isascii():
             await self._transport.send_text(
@@ -2508,7 +2531,7 @@ class ManagerBot(AuthMixin):
             await self._transport.send_text(incoming.chat, f"✗ {err}")
             return ConversationHandler.END
 
-        ctx.user_data["create_team"]["project_prefix"] = prefix
+        data["project_prefix"] = prefix
 
         # Persona picker — list global personas (no project path yet, since clone hasn't happened).
         fake_path = Path(DEFAULT_CONFIG).parent
@@ -2523,12 +2546,17 @@ class ManagerBot(AuthMixin):
     async def _create_team_persona_mgr_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        msg_ref = self._msg_ref_from_query(query)
+        # Finding 6: bail cleanly when wizard state has been dropped.
+        data = _team_session_or_none(ctx)
+        if data is None:
+            await self._transport.edit_text(msg_ref, _TEAM_SESSION_LOST_MESSAGE)
+            return ConversationHandler.END
         _, persona = query.data.split(":", 1)
-        ctx.user_data["create_team"]["persona_mgr"] = persona
+        data["persona_mgr"] = persona
 
         fake_path = Path(DEFAULT_CONFIG).parent
         buttons = _build_persona_keyboard(fake_path, callback_prefix="ct_persona_dev")
-        msg_ref = self._msg_ref_from_query(query)
         await self._transport.edit_text(
             msg_ref,
             f"Manager persona: {persona}\n\nPick dev-role persona:",
@@ -2539,8 +2567,14 @@ class ManagerBot(AuthMixin):
     async def _create_team_persona_dev_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
         await query.answer()
+        msg_ref = self._msg_ref_from_query(query)
+        # Finding 6: bail cleanly when wizard state has been dropped.
+        data = _team_session_or_none(ctx)
+        if data is None:
+            await self._transport.edit_text(msg_ref, _TEAM_SESSION_LOST_MESSAGE)
+            return ConversationHandler.END
         _, persona = query.data.split(":", 1)
-        ctx.user_data["create_team"]["persona_dev"] = persona
+        data["persona_dev"] = persona
 
         # All inputs captured — kick off orchestrator (F7).
         return await self._create_team_execute(update, ctx)
@@ -2567,14 +2601,13 @@ class ManagerBot(AuthMixin):
         # Graceful exit when wizard state is missing/stale (Finding 6) — a
         # plain ctx.user_data["create_team"][...] read would KeyError and
         # leave the user with no feedback.
-        data = ctx.user_data.get("create_team")
-        if not data or not all(
+        data = _team_session_or_none(ctx)
+        if data is None or not all(
             k in data for k in ("project_prefix", "persona_mgr", "persona_dev", "repo")
         ):
             incoming = self._incoming_from_update(update)
             await self._transport.send_text(
-                incoming.chat,
-                "Session expired — please /create_team again.",
+                incoming.chat, _TEAM_SESSION_LOST_MESSAGE,
             )
             return ConversationHandler.END
 
