@@ -396,6 +396,7 @@ class ManagerBot(AuthMixin):
 
         bot_username = (project.get("managed_bot_username") or "").lstrip("@")
         if bot_username:
+            bfc = None
             try:
                 BotFatherClient = _load_botfather_dependency()
                 cfg_path = self._project_config_path or DEFAULT_CONFIG
@@ -415,6 +416,12 @@ class ManagerBot(AuthMixin):
                 )
             except Exception as exc:
                 failures.append(f"delete @{bot_username} via BotFather: {exc}")
+            finally:
+                # Finding 8: always disconnect the Telethon client we opened
+                # for the cleanup — leaking it pins the session SQLite file
+                # and contends with the manager's own client.
+                if bfc is not None:
+                    await _safe_disconnect_bfc(bfc)
 
         return notes, failures
 
