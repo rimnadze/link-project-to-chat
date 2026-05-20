@@ -716,3 +716,141 @@ async def test_e2e_create_project_with_github_still_works(tmp_path, monkeypatch)
     dest = fake_client.clone_repo.await_args.args[1]
     assert "repos" in str(dest)
     assert "rg" in str(dest)
+
+
+# ─── Task 21: end-to-end create-team flow with GitLab ──────────────────────
+
+
+async def test_e2e_create_team_with_gitlab(tmp_path, monkeypatch):
+    """End-to-end team-create wizard with provider=gitlab, stopping at clone.
+
+    Walks: provider:gitlab → ct_source:github → list page → pick repo →
+    pre-set name + personas → ``_create_team_execute``. Stubs BotFather +
+    Telethon paths and halts execution right after the clone step by raising
+    from ``add_bot``. Asserts ``GitLabClient.clone_repo`` was awaited with a
+    dest path under ``repos/<prefix>/``.
+
+    Mirrors ``test_e2e_create_project_with_gitlab`` for the team flow. The
+    subsequent BotFather/supergroup orchestration is orthogonal and provider-
+    agnostic, so it's stubbed out.
+    """
+    import json
+    from unittest.mock import AsyncMock, patch
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "telegram_api_id": 1,
+        "telegram_api_hash": "x",
+        "gitlab_pat": "glpat-x",
+        "gitlab_host": "gitlab.com",
+        "github_pat": "ghp_x",
+    }))
+    (cfg.parent / "telethon.session").write_text("x")
+    bot = _make_e2e_manager_bot(cfg)
+    # ``_create_team_execute`` reads ``self._telethon_client`` (via getattr)
+    # and ``self._pm.start_team(...)`` — provide harmless stubs.
+    bot._telethon_client = MagicMock()
+    bot._pm = MagicMock()
+
+    fake_repos = [
+        RepoInfo(
+            name="my-app",
+            full_name="acme/my-app",
+            html_url="https://gitlab.com/acme/my-app",
+            clone_url="https://gitlab.com/acme/my-app.git",
+            description="An app",
+            private=True,
+        ),
+    ]
+    fake_client = MagicMock()
+    fake_client.list_repos = AsyncMock(return_value=(fake_repos, False))
+    fake_client.clone_repo = AsyncMock()
+    fake_client.close = AsyncMock()
+    monkeypatch.setattr(
+        "link_project_to_chat.gitlab_client.GitLabClient",
+        lambda **kw: fake_client,
+    )
+
+    ctx = MagicMock()
+    ctx.user_data = {"create_team": {"config_path": str(cfg)}}
+
+    # Step 1: provider pick → gitlab. Should land on CREATE_TEAM_SOURCE.
+    pick = _make_button_update("provider:gitlab")
+    state = await bot._create_provider_pick_callback(
+        pick, ctx, user_data_key="create_team",
+    )
+    assert ctx.user_data["create_team"]["provider"] == "gitlab"
+    assert state == ManagerBot.CREATE_TEAM_SOURCE
+
+    # Step 2: team-source pick → ``ct_source:github`` (browse list). Should
+    # land on CREATE_TEAM_REPO_LIST and call GitLabClient.list_repos.
+    source = _make_button_update("ct_source:github")
+    state = await bot._create_team_source_callback(source, ctx)
+    fake_client.list_repos.assert_awaited()
+    assert state == ManagerBot.CREATE_TEAM_REPO_LIST
+    assert "acme/my-app" in ctx.user_data["create_team"]["repos"]
+
+    # Step 3: repo pick → "create_repo_acme/my-app". Team flow lands on
+    # CREATE_TEAM_NAME (not the project's CREATE_NAME) and stores the repo.
+    repo_pick = _make_button_update("create_repo_acme/my-app")
+    state = await bot._create_repo_list_callback(
+        repo_pick, ctx, user_data_key="create_team",
+    )
+    assert state == ManagerBot.CREATE_TEAM_NAME
+    assert ctx.user_data["create_team"]["repo"]["full_name"] == "acme/my-app"
+
+    # Step 4: pre-set name + personas (skipping the prefix-validation +
+    # persona-pick callbacks; those are unit-tested elsewhere) and invoke
+    # ``_create_team_execute``. Stub BotFather + supergroup orchestration so
+    # execution halts right after the clone step.
+    ctx.user_data["create_team"]["project_prefix"] = "myteam"
+    ctx.user_data["create_team"]["persona_mgr"] = "developer"
+    ctx.user_data["create_team"]["persona_dev"] = "developer"
+
+    async def fake_create_bot_with_retry(*args, **kwargs):
+        return ("FAKETOKEN", "bot_user")
+
+    bfc_stub = MagicMock()
+    bfc_stub.disable_privacy = AsyncMock()
+    bfc_stub._ensure_client = AsyncMock(return_value=MagicMock())
+    bfc_stub.disconnect = AsyncMock()
+
+    class _StopAfterClone(Exception):
+        pass
+
+    async def boom_add_bot(*a, **kw):
+        # Raised from add_bot — after clone_repo completed and group_id was
+        # captured, before any config commit. Falls into the partial-failure
+        # handler in ``_create_team_execute``, which is non-fatal for the test.
+        raise _StopAfterClone()
+
+    from link_project_to_chat.repo_provider import RepoInfo as _RealRepoInfo
+
+    with patch(
+        "link_project_to_chat.manager.bot._load_team_create_dependencies",
+    ) as mock_deps, patch(
+        "link_project_to_chat.manager.bot._create_bot_with_retry",
+        new=fake_create_bot_with_retry,
+    ):
+        mock_deps.return_value = (
+            lambda **kw: bfc_stub,           # BotFatherClient
+            MagicMock(),                     # GitHubClient (unused — provider factory wins)
+            _RealRepoInfo,                   # RepoInfo (re-hydrates dict → dataclass)
+            boom_add_bot,                    # add_bot — raise to halt after clone
+            AsyncMock(return_value=-100),    # create_supergroup
+            AsyncMock(),                     # invite_user
+            AsyncMock(),                     # promote_admin
+            lambda s: s,                     # sanitize_bot_username (identity)
+        )
+
+        update = _make_button_update("provider:gitlab")  # any Update-shaped mock works
+        await bot._create_team_execute(update, ctx)
+
+    # The clone step ran via the GitLab provider with dest under repos/myteam/.
+    fake_client.clone_repo.assert_awaited_once()
+    call_dest = fake_client.clone_repo.await_args.args[1]
+    assert "repos" in str(call_dest)
+    assert "myteam" in str(call_dest)
+    fake_client.close.assert_awaited()
