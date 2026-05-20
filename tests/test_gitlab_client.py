@@ -224,10 +224,11 @@ async def test_list_repos_httpx_maps_fields(gl_api_client):
     assert [r.private for r in repos] == [True, True, False]  # internal counts as non-public
     assert repos[1].description == ""  # None coerced to ""
     assert has_next is False
-    # Workaround: order_by=last_activity_at + simple=true avoids the GitLab
-    # /projects 500 bug triggered by deletion-pending projects + heavy joins.
+    # Workaround: omit order_by entirely + keep simple=true to dodge a
+    # GitLab.com /projects 500 bug triggered by deletion-pending projects in
+    # the membership set (any value of order_by trips it; default sort is fine).
     params = mock_client.get.await_args.kwargs["params"]
-    assert params["order_by"] == "last_activity_at"
+    assert "order_by" not in params
     assert params["simple"] == "true"
 
 
@@ -276,11 +277,40 @@ async def test_list_repos_glab_parses_link_header_and_body(gl_glab_client):
     assert args[0] == "api"
     assert "--include" in args
     assert any("projects" in a and "membership=true" in a for a in args)
-    # Workaround: order_by=last_activity_at + simple=true avoids the GitLab
-    # /projects 500 bug triggered by deletion-pending projects + heavy joins.
-    assert any(
-        "order_by=last_activity_at" in a and "simple=true" in a for a in args
-    )
+    # Workaround: omit order_by entirely + keep simple=true to dodge a
+    # GitLab.com /projects 500 bug triggered by deletion-pending projects in
+    # the membership set (any value of order_by trips it; default sort is fine).
+    assert all("order_by" not in a for a in args)
+    assert any("simple=true" in a for a in args)
+
+
+async def test_list_repos_omits_order_by_to_avoid_gitlab_bug(gl_api_client, gl_glab_client):
+    """GitLab.com /projects returns HTTP 500 for ANY value of `order_by` when
+    the membership set contains projects in `deletion_scheduled` state
+    (account-state bug, observed 2026-05). We omit `order_by` entirely — the
+    REST default (created_at desc) is fine for the wizard's paginated picker.
+
+    This test pins the workaround so a future refactor doesn't silently
+    reintroduce the parameter.
+    """
+    import json as _json
+
+    # httpx path: params dict must NOT carry order_by.
+    with patch.object(gl_api_client, "_client") as mock_client:
+        mock_client.get = AsyncMock(return_value=_mock_resp(200, [], {"link": ""}))
+        await gl_api_client.list_repos(page=1, per_page=5)
+    params = mock_client.get.await_args.kwargs["params"]
+    assert "order_by" not in params
+
+    # glab path: URL string must NOT contain order_by.
+    body = _json.dumps([])
+    stdout = "HTTP/2.0 200 OK\r\n\r\n" + body
+    with patch(
+        "link_project_to_chat.gitlab_client._run_glab",
+        AsyncMock(return_value=(0, stdout, "")),
+    ) as mock_run:
+        await gl_glab_client.list_repos(page=1, per_page=5)
+    assert all("order_by" not in a for a in mock_run.await_args.args)
 
 
 async def test_list_repos_glab_self_hosted_uses_hostname(monkeypatch):

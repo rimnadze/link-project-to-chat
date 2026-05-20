@@ -156,19 +156,19 @@ class GitLabClient:
         return await self._list_repos_api(page, per_page)
 
     async def _list_repos_api(self, page: int, per_page: int) -> tuple[list[RepoInfo], bool]:
-        # `order_by=updated_at` + heavy default joins can trip a GitLab.com
-        # /projects bug that returns HTTP 500 when the membership set contains
-        # projects in the `deletion_scheduled` state. Sorting by
-        # `last_activity_at` takes a different code path, and `simple=true`
-        # skips the joins (e.g. statistics/permissions/links) we don't need —
-        # the RepoInfo mapping only consumes path / path_with_namespace /
-        # web_url / http_url_to_repo / description / visibility, all present
-        # in the simple response.
+        # Omit `order_by` entirely: GitLab.com /projects returns HTTP 500 for
+        # ANY value of `order_by` when the membership set contains projects in
+        # the `deletion_scheduled` state (account-state bug, observed 2026-05).
+        # The REST default (created_at desc) is fine for the wizard's
+        # paginated picker. `simple=true` still skips the joins
+        # (statistics/permissions/links) we don't need — the RepoInfo mapping
+        # only consumes path / path_with_namespace / web_url /
+        # http_url_to_repo / description / visibility, all present in the
+        # simple response.
         resp = await self._client.get(
             "/projects",
             params={
                 "membership": "true",
-                "order_by": "last_activity_at",
                 "simple": "true",
                 "page": page,
                 "per_page": per_page,
@@ -185,13 +185,14 @@ class GitLabClient:
         args = ["api"]
         if self._host != "gitlab.com":
             args.extend(["--hostname", self._host])
-        # See _list_repos_api: `order_by=last_activity_at` + `simple=true`
-        # dodges a GitLab.com /projects HTTP 500 triggered by
-        # `deletion_scheduled` projects in the membership set combined with
-        # the heavy default joins on the sorted-by-updated_at code path.
+        # See _list_repos_api: omit `order_by` entirely — GitLab.com /projects
+        # returns HTTP 500 for ANY value of `order_by` when the membership set
+        # contains `deletion_scheduled` projects (account-state bug). Default
+        # sort (created_at desc) is fine for the wizard. `simple=true` stays
+        # to skip joins we don't consume.
         args.extend([
             "--include",
-            f"projects?membership=true&order_by=last_activity_at&simple=true&page={page}&per_page={per_page}",
+            f"projects?membership=true&simple=true&page={page}&per_page={per_page}",
         ])
         code, stdout, stderr = await _run_glab(
             *args,
