@@ -3345,31 +3345,44 @@ class ManagerBot(AuthMixin):
                     model_id = mid
                     name = rest[len(mid) + 1:]
                     break
-            if model_id and name:
-                projects = self._load_projects()
-                if name in projects:
-                    backend_name = projects[name].get("backend") or "claude"
-                    patch_backend_state(
-                        name,
-                        backend_name,
-                        {"model": model_id},
-                        self._project_config_path or DEFAULT_CONFIG,
-                    )
-                current = model_id
-                rows = []
-                for mid, label in MODEL_OPTIONS:
-                    prefix = "● " if current == mid else ""
-                    rows.append([Button(
-                        label=f"{prefix}{label}",
-                        value=f"proj_model_{mid}_{name}",
-                    )])
-                rows.append([Button(label="« Back", value=f"proj_edit_{name}")])
-                label = next((l for m, l in MODEL_OPTIONS if m == model_id), model_id)
+            if not (model_id and name):
+                # Finding 10: malformed model-pick payload — tell the operator
+                # to refresh instead of silently no-op'ing.
                 await self._transport.edit_text(
                     click.message,
-                    f"Model for '{name}' set to: {label}\nRestart the project to apply.",
-                    buttons=Buttons(rows=rows),
+                    "Invalid model action. Refresh the menu.",
                 )
+                return
+            projects = self._load_projects()
+            if name not in projects:
+                # Finding 10: project no longer exists — say so.
+                await self._transport.edit_text(
+                    click.message,
+                    f"Project '{name}' no longer exists. Refresh the menu.",
+                )
+                return
+            backend_name = projects[name].get("backend") or "claude"
+            patch_backend_state(
+                name,
+                backend_name,
+                {"model": model_id},
+                self._project_config_path or DEFAULT_CONFIG,
+            )
+            current = model_id
+            rows = []
+            for mid, label in MODEL_OPTIONS:
+                prefix = "● " if current == mid else ""
+                rows.append([Button(
+                    label=f"{prefix}{label}",
+                    value=f"proj_model_{mid}_{name}",
+                )])
+            rows.append([Button(label="« Back", value=f"proj_edit_{name}")])
+            label = next((l for m, l in MODEL_OPTIONS if m == model_id), model_id)
+            await self._transport.edit_text(
+                click.message,
+                f"Model for '{name}' set to: {label}\nRestart the project to apply.",
+                buttons=Buttons(rows=rows),
+            )
 
         elif value.startswith("proj_rig_on_") or value.startswith("proj_rig_off_"):
             if not await self._require_executor_button(click):
@@ -3381,32 +3394,39 @@ class ManagerBot(AuthMixin):
                 new_state = False
                 name = value[len("proj_rig_off_"):]
             projects = self._load_projects()
-            if name in projects:
-                if new_state:
-                    projects[name]["respond_in_groups"] = True
-                else:
-                    # Emit-only-when-True policy: drop the key on Off so
-                    # configs round-trip cleanly through save_config.
-                    projects[name].pop("respond_in_groups", None)
-                self._save_projects(projects)
-                rows = [
-                    [Button(
-                        label=("● On" if new_state else "On"),
-                        value=f"proj_rig_on_{name}",
-                    )],
-                    [Button(
-                        label=("● Off" if not new_state else "Off"),
-                        value=f"proj_rig_off_{name}",
-                    )],
-                    [Button(label="« Back", value=f"proj_edit_{name}")],
-                ]
+            if name not in projects:
+                # Finding 10: surface that the project is gone instead of
+                # silently no-op'ing on a stale keyboard.
                 await self._transport.edit_text(
                     click.message,
-                    f"Respond in groups for '{name}' set to: "
-                    f"{'On' if new_state else 'Off'}\n"
-                    "Restart the project to apply.",
-                    buttons=Buttons(rows=rows),
+                    f"Project '{name}' no longer exists. Refresh the menu.",
                 )
+                return
+            if new_state:
+                projects[name]["respond_in_groups"] = True
+            else:
+                # Emit-only-when-True policy: drop the key on Off so
+                # configs round-trip cleanly through save_config.
+                projects[name].pop("respond_in_groups", None)
+            self._save_projects(projects)
+            rows = [
+                [Button(
+                    label=("● On" if new_state else "On"),
+                    value=f"proj_rig_on_{name}",
+                )],
+                [Button(
+                    label=("● Off" if not new_state else "Off"),
+                    value=f"proj_rig_off_{name}",
+                )],
+                [Button(label="« Back", value=f"proj_edit_{name}")],
+            ]
+            await self._transport.edit_text(
+                click.message,
+                f"Respond in groups for '{name}' set to: "
+                f"{'On' if new_state else 'Off'}\n"
+                "Restart the project to apply.",
+                buttons=Buttons(rows=rows),
+            )
 
         elif value.startswith("global_model_"):
             if not await self._require_executor_button(click):
@@ -3460,10 +3480,21 @@ class ManagerBot(AuthMixin):
                 return
             suffix = value[len("proj_ptog_"):]
             if "|" not in suffix:
+                # Finding 10: surface a visible error instead of silently
+                # returning — stale buttons must tell the operator to refresh.
+                await self._transport.edit_text(
+                    click.message,
+                    "Invalid plugin-toggle action. Refresh the menu.",
+                )
                 return
             plugin_name, name = suffix.rsplit("|", 1)
             projects = self._load_projects()
             if name not in projects:
+                # Finding 10: project removed since the keyboard was rendered.
+                await self._transport.edit_text(
+                    click.message,
+                    f"Project '{name}' no longer exists. Refresh the menu.",
+                )
                 return
             plugins = projects[name].get("plugins", [])
             active_names = [p.get("name") for p in plugins]
