@@ -714,6 +714,21 @@ async def test_app_property_returns_underlying_application():
     assert hasattr(app, "add_handler")  # quacks like an Application
 
 
+async def test_set_command_menu_refreshes_started_telegram_menu():
+    """Late plugin command registration can refresh Telegram's slash menu."""
+    t, bot = _make_transport_with_mock_bot()
+    bot.delete_webhook = AsyncMock()
+    bot.get_me = AsyncMock(return_value=SimpleNamespace(
+        id=1, full_name="Bot", username="bot_a",
+    ))
+    bot.set_my_commands = AsyncMock()
+
+    await t.post_init(t.app)
+    await t.set_command_menu([("help", "Help"), ("todo", "Todo")])
+
+    bot.set_my_commands.assert_awaited_with([("help", "Help"), ("todo", "Todo")])
+
+
 async def test_enable_team_relay_from_session_constructs_client(monkeypatch):
     """TelegramTransport.enable_team_relay_from_session owns the telethon import
     so bot.py never has to know the optional library exists."""

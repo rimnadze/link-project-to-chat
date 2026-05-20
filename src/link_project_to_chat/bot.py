@@ -3255,6 +3255,22 @@ class ProjectBot(AuthMixin):
             self._backfill_own_bot_username()
         self._refresh_team_system_note()
         await self._init_plugins()
+        # The transport's initial command-menu push ran before plugin commands
+        # were registered. Refresh through the transport abstraction so bot.py
+        # stays platform-free; transports without command menus may no-op.
+        if self._plugins:
+            try:
+                command_menu = list(COMMANDS)
+                seen = {name for name, _desc in command_menu}
+                for plugin in self._plugins:
+                    for bc in plugin.commands():
+                        if bc.command in seen:
+                            continue
+                        command_menu.append((bc.command, bc.description or bc.command))
+                        seen.add(bc.command)
+                await self._transport.set_command_menu(command_menu)
+            except Exception:
+                logger.warning("failed to refresh command menu", exc_info=True)
 
         # Startup ping to trusted users. Skipped for team bots: they live in
         # the team supergroup and have no DM with trusted users, so every send

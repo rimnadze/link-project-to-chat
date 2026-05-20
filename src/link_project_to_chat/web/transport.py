@@ -328,6 +328,9 @@ class WebTransport:
     def on_ready(self, callback: OnReadyCallback) -> None:
         self._on_ready_callbacks.append(callback)
 
+    async def set_command_menu(self, commands: list[tuple[str, str]]) -> None:
+        return
+
     def on_stop(self, callback) -> None:
         self._on_stop_callbacks.append(callback)
 

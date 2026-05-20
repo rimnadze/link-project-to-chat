@@ -290,6 +290,12 @@ def _bc(name: str) -> BotCommand:
     return BotCommand(command=name, description="", handler=_h)
 
 
+def _bc_with_description(name: str, description: str) -> BotCommand:
+    async def _h(_ci):  # pragma: no cover — never invoked in these tests
+        return None
+    return BotCommand(command=name, description=description, handler=_h)
+
+
 @pytest.mark.asyncio
 async def test_plugin_cannot_shadow_core_command(monkeypatch, caplog):
     """A plugin registering /help (a CORE_COMMAND_NAMES entry) is dropped
@@ -326,6 +332,60 @@ async def test_plugin_cannot_shadow_core_command(monkeypatch, caplog):
     assert "rec_open" in names, "non-core command from same plugin should still register"
     assert any("reserved core command" in r.message.lower() or "core command" in r.message.lower()
                for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_after_ready_refreshes_transport_command_menu_for_plugin_commands(monkeypatch):
+    """Plugin slash commands should be pushed through the Transport layer.
+
+    bot.py must not import Telegram types to refresh the platform command menu.
+    """
+    from link_project_to_chat.bot import COMMANDS
+
+    p = _RecordingCommandPlugin(_ctx(), {})
+    p.name = "rec"
+    p._commands_to_register = [_bc_with_description("rec_open", "Open recorder")]
+
+    class _MenuTransport:
+        TRANSPORT_ID = "fake"
+
+        def __init__(self):
+            self.registered: list[str] = []
+            self.command_menu: list[tuple[str, str]] | None = None
+
+        def on_command(self, name, handler):
+            self.registered.append(name)
+
+        async def set_command_menu(self, commands):
+            self.command_menu = list(commands)
+
+    transport = _MenuTransport()
+    bot = _make_bot([])
+    bot._transport = transport
+    bot.transport_kind = "telegram"
+    bot._plugin_configs = [{"name": "rec"}]
+    bot._plugins = []
+    bot.team_name = ""
+    bot.role = None
+    bot._refresh_team_system_note = lambda: None
+    bot._backfill_own_bot_username = lambda: None
+    bot._auth_dirty = False
+    bot._wrap_plugin_command = lambda plugin, bc: bc.handler
+
+    import link_project_to_chat.bot as bot_mod
+    monkeypatch.setattr(bot_mod, "load_plugin", lambda *a, **kw: p)
+
+    identity = Identity(
+        transport_id="fake", native_id="bot", display_name="Bot",
+        handle="bot", is_bot=True,
+    )
+
+    await bot._after_ready(identity)
+
+    assert "rec_open" in transport.registered
+    assert transport.command_menu is not None
+    assert ("rec_open", "Open recorder") in transport.command_menu
+    assert all(command in transport.command_menu for command in COMMANDS)
 
 
 @pytest.mark.asyncio

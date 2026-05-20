@@ -283,6 +283,14 @@ class Transport(Protocol):
         """
         ...
 
+    async def set_command_menu(self, commands: list[tuple[str, str]]) -> None:
+        """Replace the platform's slash-command autocomplete/menu if supported.
+
+        Called after late command registration, such as plugin commands loaded
+        during on_ready. Transports without a platform command menu MAY no-op.
+        """
+        ...
+
     def on_stop(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register a callback fired during the Transport's shutdown sequence,
         BEFORE the platform actually tears down. Plugins use this to release

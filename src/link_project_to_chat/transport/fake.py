@@ -100,6 +100,7 @@ class FakeTransport:
         self._on_ready_callbacks: list[OnReadyCallback] = []
         self._on_stop_callbacks: list = []
         self._authorizer: AuthorizerCallback | None = None
+        self.command_menu: list[tuple[str, str]] | None = None
         self._msg_counter = itertools.count(1)
         self._running = False
         self.opened_prompts: list[OpenedPrompt] = []
@@ -191,6 +192,9 @@ class FakeTransport:
 
     def on_ready(self, callback: OnReadyCallback) -> None:
         self._on_ready_callbacks.append(callback)
+
+    async def set_command_menu(self, commands: list[tuple[str, str]]) -> None:
+        self.command_menu = list(commands)
 
     def on_stop(self, callback) -> None:
         self._on_stop_callbacks.append(callback)

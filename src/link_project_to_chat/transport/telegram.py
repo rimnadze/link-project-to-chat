@@ -448,6 +448,12 @@ class TelegramTransport:
     def on_ready(self, callback) -> None:
         self._on_ready_callbacks.append(callback)
 
+    async def set_command_menu(self, commands: list[tuple[str, str]]) -> None:
+        self._menu = list(commands)
+        if not self._post_init_ran:
+            return
+        await self._app.bot.set_my_commands(self._menu)
+
     def on_stop(self, callback) -> None:
         self._on_stop_callbacks.append(callback)
 

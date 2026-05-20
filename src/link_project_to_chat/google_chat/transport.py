@@ -441,6 +441,9 @@ class GoogleChatTransport:
     def on_ready(self, callback) -> None:
         self._on_ready_callbacks.append(callback)
 
+    async def set_command_menu(self, commands: list[tuple[str, str]]) -> None:
+        return
+
     async def _fire_on_ready(self) -> None:
         for cb in self._on_ready_callbacks:
             try:
