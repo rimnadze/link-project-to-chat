@@ -273,6 +273,18 @@ async def test_list_repos_glab_failure_raises(gl_glab_client):
             await gl_glab_client.list_repos()
 
 
+async def test_list_repos_glab_raises_on_dict_response_with_message(gl_glab_client):
+    """When glab returns a JSON error object (token invalid, etc.), raise a domain error
+    instead of iterating dict keys."""
+    import json
+    body = json.dumps({"message": "401 Unauthorized"})
+    stdout = "HTTP/2.0 401 Unauthorized\r\n\r\n" + body
+    with patch("link_project_to_chat.gitlab_client._run_glab",
+               AsyncMock(return_value=(0, stdout, ""))):
+        with pytest.raises(Exception, match="(?i)glab api error.*401"):
+            await gl_glab_client.list_repos()
+
+
 async def test_validate_repo_url_gitlab_com(gl_api_client):
     project = {
         "path": "myproj",

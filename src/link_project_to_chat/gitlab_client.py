@@ -172,7 +172,14 @@ class GitLabClient:
         if not body_part:
             raise Exception("glab api returned no body")
         has_next = 'rel="next"' in headers_part
-        repos = [_repo_info_from_project(p) for p in json.loads(body_part)]
+        parsed = json.loads(body_part)
+        if not isinstance(parsed, list):
+            msg = parsed.get("message") if isinstance(parsed, dict) else None
+            raise Exception(
+                f"glab api error: {msg or 'unexpected response shape'}. "
+                "Token may be invalid — re-run `glab auth login`."
+            )
+        repos = [_repo_info_from_project(p) for p in parsed]
         return repos, has_next
 
     async def validate_repo_url(self, url: str) -> RepoInfo | None:
