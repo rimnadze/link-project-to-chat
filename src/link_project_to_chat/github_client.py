@@ -8,7 +8,6 @@ import os
 import re
 import subprocess
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -19,14 +18,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RepoInfo:
-    name: str
-    full_name: str
-    html_url: str
-    clone_url: str
-    description: str
-    private: bool
+# RepoInfo moved to repo_provider.py for cross-provider sharing.
+# Re-exported here so legacy imports (`from .github_client import RepoInfo`)
+# keep working. New code should prefer `from .repo_provider import RepoInfo`.
+from .repo_provider import RepoInfo  # noqa: F401
 
 
 _GITHUB_URL_RE = re.compile(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
