@@ -127,6 +127,13 @@ def _flatten_button_labels(buttons):
     return [button.label for row in buttons.rows for button in row]
 
 
+def _fake_message_ref():
+    from link_project_to_chat.transport import ChatKind, ChatRef, MessageRef
+
+    chat = ChatRef(transport_id="fake", native_id="1", kind=ChatKind.DM)
+    return MessageRef(transport_id="fake", native_id="1", chat=chat)
+
+
 @pytest.mark.asyncio
 async def test_project_create_provider_pick_gitlab_stores_choice_and_advances(tmp_path):
     """After picking GitLab, the wizard stores ``provider="gitlab"`` and shows
@@ -456,6 +463,161 @@ async def test_gitlab_team_paste_prompt_is_provider_neutral(tmp_path):
 
     assert state == ManagerBot.CREATE_TEAM_REPO_URL
     assert "GitHub" not in mb._transport.edited_messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_gitlab_browse_unconfigured_edits_error(tmp_path, monkeypatch):
+    """Browse should show an actionable error when GitLab provider construction fails."""
+    from telegram.ext import ConversationHandler
+
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+    monkeypatch.setattr("link_project_to_chat.gitlab_client._glab_available", lambda host="gitlab.com": False)
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(gitlab_host="gitlab.com"), cfg_path)
+
+    bot = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    bot._transport = FakeTransport()
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg_path), "provider": "gitlab"}}
+
+    state = await bot._show_repo_page(_fake_message_ref(), ctx, page=1)
+
+    assert state == ConversationHandler.END
+    assert bot._transport.edited_messages
+    text = bot._transport.edited_messages[-1].text
+    assert "GitLab" in text
+    assert "/setup" in text
+
+
+@pytest.mark.asyncio
+async def test_gitlab_paste_url_unconfigured_sends_error(tmp_path, monkeypatch):
+    """Pasted URL validation should also report unconfigured GitLab."""
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+    monkeypatch.setattr("link_project_to_chat.gitlab_client._glab_available", lambda host="gitlab.com": False)
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(gitlab_host="gitlab.com"), cfg_path)
+
+    bot = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    bot._transport = FakeTransport()
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg_path), "provider": "gitlab"}}
+
+    state = await bot._create_repo_url(
+        _make_text_update_for_setup("https://gitlab.com/acme/project"),
+        ctx,
+    )
+
+    assert state == ManagerBot.CREATE_REPO_URL
+    assert bot._transport.sent_messages
+    text = bot._transport.sent_messages[-1].text
+    assert "GitLab" in text
+    assert "/setup" in text
+
+
+@pytest.mark.asyncio
+async def test_project_clone_provider_construction_failure_sends_retry(tmp_path, monkeypatch):
+    """Clone should show Retry/Cancel even when provider construction fails before clone_repo."""
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport import ChatKind, ChatRef
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+    monkeypatch.setattr("link_project_to_chat.gitlab_client._glab_available", lambda host="gitlab.com": False)
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(gitlab_host="gitlab.com"), cfg_path)
+
+    bot = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    bot._transport = FakeTransport()
+    ctx = MagicMock()
+    ctx.user_data = {
+        "create": {
+            "config_path": str(cfg_path),
+            "provider": "gitlab",
+            "name": "project",
+            "repo": {
+                "name": "project",
+                "full_name": "acme/project",
+                "html_url": "https://gitlab.com/acme/project",
+                "clone_url": "https://gitlab.com/acme/project.git",
+                "description": "",
+                "private": True,
+            },
+        },
+    }
+    chat = ChatRef(transport_id="fake", native_id="1", kind=ChatKind.DM)
+
+    state = await bot._execute_clone(chat, ctx)
+
+    assert state == ManagerBot.CREATE_CLONE
+    assert bot._transport.sent_messages
+    sent = bot._transport.sent_messages[-1]
+    assert "Clone failed" in sent.text
+    assert sent.buttons is not None
+
+
+@pytest.mark.asyncio
+async def test_browse_close_failure_does_not_mask_provider_error(tmp_path, monkeypatch):
+    """Provider close errors should not replace the user-visible provider error."""
+    from telegram.ext import ConversationHandler
+
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager import bot as manager_bot
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(), cfg_path)
+
+    class BrokenProvider:
+        async def list_repos(self, *, page: int, per_page: int):
+            raise RuntimeError("list failed")
+
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(manager_bot, "_build_repo_provider", lambda *a, **kw: BrokenProvider())
+
+    bot = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    bot._transport = FakeTransport()
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg_path), "provider": "github"}}
+
+    state = await bot._show_repo_page(_fake_message_ref(), ctx, page=1)
+
+    assert state == ConversationHandler.END
+    assert "list failed" in bot._transport.edited_messages[-1].text
 
 
 @pytest.mark.asyncio

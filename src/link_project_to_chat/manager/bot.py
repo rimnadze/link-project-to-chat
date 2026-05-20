@@ -265,6 +265,62 @@ def _build_repo_provider(ctx, config, user_data_key: str = "create") -> "RepoPro
     return GitHubClient(pat=config.github_pat)
 
 
+def _selected_repo_provider(ctx, user_data_key: str = "create") -> str:
+    return ctx.user_data.get(user_data_key, {}).get("provider", "github")
+
+
+def _format_repo_provider_error(ctx, user_data_key: str, exc: Exception) -> str:
+    provider = _selected_repo_provider(ctx, user_data_key=user_data_key)
+    detail = str(exc)
+    if provider == "gitlab" and (
+        "GitLab PAT required" in detail or "glab CLI" in detail
+    ):
+        return (
+            "GitLab not configured. Run /setup to set a GitLab PAT, "
+            "set GITLAB_TOKEN, or authenticate glab CLI.\n\n"
+            f"Details: {detail}"
+        )
+    if provider == "github" and (
+        "GitHub PAT required" in detail or "gh CLI" in detail
+    ):
+        return (
+            "GitHub not configured. Run /setup to set a GitHub PAT, "
+            "set GITHUB_TOKEN, or authenticate gh CLI.\n\n"
+            f"Details: {detail}"
+        )
+    return f"Repo provider error: {detail}"
+
+
+async def _close_repo_provider(provider: "RepoProvider") -> None:
+    try:
+        await provider.close()
+    except Exception as exc:
+        logger.warning("Repo provider close failed: %s", exc)
+
+
+async def _safe_disconnect_bfc(bfc) -> None:
+    """Wrap BotFatherClient.disconnect() so cleanup errors never mask the
+    original exception. Logs at warning level so operators can still see
+    Telethon teardown issues without losing the in-flight failure."""
+    try:
+        await bfc.disconnect()
+    except Exception as exc:
+        logger.warning("BotFather client disconnect failed: %s", exc)
+
+
+def _load_config_or_error(cfg_path: Path):
+    """Helper: try load_config(cfg_path). Returns (config, None) on success
+    or (None, error_text) on failure. Lets handlers surface configuration
+    errors to the user instead of dying silently in their callback."""
+    from ..config import load_config
+
+    try:
+        return load_config(cfg_path), None
+    except Exception as exc:
+        logger.exception("load_config failed for %s", cfg_path)
+        return None, f"Configuration error: {exc}"
+
+
 class ManagerBot(AuthMixin):
     _MAX_MESSAGES_PER_MINUTE = 20
 
@@ -1091,9 +1147,11 @@ class ManagerBot(AuthMixin):
         """
         if not await self._guard_executor_invocation(invocation):
             return
-        from ..config import load_config
         path = self._project_config_path or DEFAULT_CONFIG
-        config = load_config(path)
+        config, err = _load_config_or_error(path)
+        if err is not None:
+            await self._transport.send_text(invocation.chat, err)
+            return
 
         lines = ["Setup status:"]
         lines.append(f"  GitHub PAT: {'configured' if config.github_pat else 'not set'}")
@@ -1949,9 +2007,11 @@ class ManagerBot(AuthMixin):
         except ImportError:
             await self._transport.send_text(incoming.chat, _CREATE_DEPS_MESSAGE)
             return ConversationHandler.END
-        from ..config import load_config
         path = self._project_config_path or DEFAULT_CONFIG
-        config = load_config(path)
+        config, err = _load_config_or_error(path)
+        if err is not None:
+            await self._transport.send_text(incoming.chat, err)
+            return ConversationHandler.END
         if not config.telegram_api_id or not config.telegram_api_hash:
             await self._transport.send_text(
                 incoming.chat,
@@ -2065,17 +2125,23 @@ class ManagerBot(AuthMixin):
     async def _show_repo_page(
         self, msg: MessageRef, ctx, page: int, user_data_key: str = "create",
     ) -> int:
-        from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
-        config = load_config(path)
-        provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
+        config, err = _load_config_or_error(path)
+        if err is not None:
+            await self._transport.edit_text(msg, err)
+            return ConversationHandler.END
+        provider: RepoProvider | None = None
         try:
+            provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
             repos, has_next = await provider.list_repos(page=page, per_page=5)
         except Exception as e:
-            await self._transport.edit_text(msg, f"Repo provider error: {e}")
+            await self._transport.edit_text(
+                msg, _format_repo_provider_error(ctx, user_data_key, e),
+            )
             return ConversationHandler.END
         finally:
-            await provider.close()
+            if provider is not None:
+                await _close_repo_provider(provider)
         if not repos:
             await self._transport.edit_text(msg, "No repos found.")
             return ConversationHandler.END
@@ -2139,17 +2205,24 @@ class ManagerBot(AuthMixin):
     ) -> int:
         incoming = self._incoming_from_update(update)
         url = incoming.text.strip()
-        from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
-        config = load_config(path)
-        provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
+        config, err = _load_config_or_error(path)
+        if err is not None:
+            await self._transport.send_text(incoming.chat, err)
+            return ConversationHandler.END
+        provider: RepoProvider | None = None
         try:
+            provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
             repo = await provider.validate_repo_url(url)
         except Exception as e:
-            await self._transport.send_text(incoming.chat, f"Error: {e}\nTry again or /cancel:")
+            await self._transport.send_text(
+                incoming.chat,
+                f"{_format_repo_provider_error(ctx, user_data_key, e)}\nTry again or /cancel:",
+            )
             return self.CREATE_TEAM_REPO_URL if user_data_key == "create_team" else self.CREATE_REPO_URL
         finally:
-            await provider.close()
+            if provider is not None:
+                await _close_repo_provider(provider)
         if not repo:
             await self._transport.send_text(
                 incoming.chat,
@@ -2213,21 +2286,30 @@ class ManagerBot(AuthMixin):
         return await self._execute_bot_creation(incoming.chat, ctx, name)
 
     async def _execute_bot_creation(self, chat: ChatRef, ctx, name: str) -> int:
-        from ..botfather import BotFatherClient, sanitize_bot_username
-        from ..config import load_config
+        # Build the BotFatherClient INSIDE the try/except so ImportError /
+        # load_config errors surface to the user instead of bubbling out of
+        # the handler and dropping the wizard without feedback. Pass-2 style:
+        # cleanup in its own guard so a disconnect failure doesn't mask the
+        # original error that the user actually needs to see.
         path = Path(ctx.user_data["create"]["config_path"])
-        config = load_config(path)
-        session_path = path.parent / "telethon.session"
-        # Reuse the manager's persistent Telethon client so we don't fight it
-        # for the same SQLite session file (would surface as "database is locked").
-        bf = BotFatherClient(
-            config.telegram_api_id,
-            config.telegram_api_hash,
-            session_path,
-            client=getattr(self, "_telethon_client", None),
-        )
-        bot_username = sanitize_bot_username(name)
+        bf = None
         try:
+            from ..botfather import BotFatherClient, sanitize_bot_username
+            config, err = _load_config_or_error(path)
+            if err is not None:
+                await self._transport.send_text(chat, err)
+                return ConversationHandler.END
+            session_path = path.parent / "telethon.session"
+            # Reuse the manager's persistent Telethon client so we don't fight
+            # it for the same SQLite session file (would surface as "database
+            # is locked").
+            bf = BotFatherClient(
+                config.telegram_api_id,
+                config.telegram_api_hash,
+                session_path,
+                client=getattr(self, "_telethon_client", None),
+            )
+            bot_username = sanitize_bot_username(name)
             token = await bf.create_bot(display_name=f"{name} Claude", username=bot_username)
             ctx.user_data["create"]["bot_token"] = token
             ctx.user_data["create"]["bot_username"] = bot_username
@@ -2246,7 +2328,8 @@ class ManagerBot(AuthMixin):
             )
             return self.CREATE_BOT
         finally:
-            await bf.disconnect()
+            if bf is not None:
+                await _safe_disconnect_bfc(bf)
 
     async def _create_bot_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
@@ -2275,15 +2358,18 @@ class ManagerBot(AuthMixin):
 
     async def _execute_clone(self, chat: ChatRef, ctx) -> int:
         from ..repo_provider import RepoInfo
-        from ..config import load_config
         path = Path(ctx.user_data["create"]["config_path"])
-        config = load_config(path)
+        config, err = _load_config_or_error(path)
+        if err is not None:
+            await self._transport.send_text(chat, err)
+            return ConversationHandler.END
         repo_data = ctx.user_data["create"]["repo"]
         repo = RepoInfo(**repo_data)
         name = ctx.user_data["create"]["name"]
         dest = path.parent / "repos" / name
-        provider = _build_repo_provider(ctx, config)
+        provider: RepoProvider | None = None
         try:
+            provider = _build_repo_provider(ctx, config)
             await provider.clone_repo(repo, dest)
             ctx.user_data["create"]["clone_path"] = str(dest)
         except Exception as e:
@@ -2291,10 +2377,15 @@ class ManagerBot(AuthMixin):
                 [Button(label="Retry", value="create_retry_clone")],
                 [Button(label="Cancel", value="create_cancel")],
             ])
-            await self._transport.send_text(chat, f"Clone failed: {e}", buttons=buttons)
+            await self._transport.send_text(
+                chat,
+                f"Clone failed: {_format_repo_provider_error(ctx, 'create', e)}",
+                buttons=buttons,
+            )
             return self.CREATE_CLONE
         finally:
-            await provider.close()
+            if provider is not None:
+                await _close_repo_provider(provider)
         return await self._finalize_create(chat, ctx)
 
     async def _create_clone_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2431,7 +2522,7 @@ class ManagerBot(AuthMixin):
 
     async def _create_team_execute(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         """F7 orchestrator: create both bots, clone repo, build group, commit config, spawn."""
-        from ..config import load_config, patch_team
+        from ..config import patch_team
         try:
             (
                 BotFatherClient,
@@ -2448,7 +2539,20 @@ class ManagerBot(AuthMixin):
             await self._transport.send_text(incoming.chat, _CREATE_DEPS_MESSAGE)
             return ConversationHandler.END
 
-        data = ctx.user_data["create_team"]
+        # Graceful exit when wizard state is missing/stale (Finding 6) — a
+        # plain ctx.user_data["create_team"][...] read would KeyError and
+        # leave the user with no feedback.
+        data = ctx.user_data.get("create_team")
+        if not data or not all(
+            k in data for k in ("project_prefix", "persona_mgr", "persona_dev", "repo")
+        ):
+            incoming = self._incoming_from_update(update)
+            await self._transport.send_text(
+                incoming.chat,
+                "Session expired — please /create_team again.",
+            )
+            return ConversationHandler.END
+
         prefix = data["project_prefix"]
         mgr_persona = data["persona_mgr"]
         dev_persona = data["persona_dev"]
@@ -2462,7 +2566,11 @@ class ManagerBot(AuthMixin):
             repo = repo_data
 
         cfg_path = self._project_config_path or DEFAULT_CONFIG
-        config = load_config(cfg_path)
+        config, err = _load_config_or_error(cfg_path)
+        if err is not None:
+            incoming = self._incoming_from_update(update)
+            await self._transport.send_text(incoming.chat, err)
+            return ConversationHandler.END
         incoming = self._incoming_from_update(update)
         chat = incoming.chat
 
@@ -2474,18 +2582,21 @@ class ManagerBot(AuthMixin):
             except Exception:
                 pass
 
-        # Reuse the manager's persistent Telethon client if available so we
-        # don't fight the team relay for the same SQLite session file.
-        bfc = BotFatherClient(
-            api_id=config.telegram_api_id,
-            api_hash=config.telegram_api_hash,
-            session_path=cfg_path.parent / "telethon.session",
-            client=getattr(self, "_telethon_client", None),
-        )
+        # Construct the BotFatherClient INSIDE the try below so failures
+        # at construction time surface to the user instead of escaping the
+        # handler. The session_path / api_id are derived from the already-
+        # validated config above.
+        bfc = None
 
         completed: dict[str, str] = {}
         config_committed = False
         try:
+            bfc = BotFatherClient(
+                api_id=config.telegram_api_id,
+                api_hash=config.telegram_api_hash,
+                session_path=cfg_path.parent / "telethon.session",
+                client=getattr(self, "_telethon_client", None),
+            )
             # --- Bot 1 (manager) ---
             mgr_base = sanitize_bot_username(f"{prefix}_mgr")
             mgr_token, mgr_username = await _create_bot_with_retry(
@@ -2512,11 +2623,13 @@ class ManagerBot(AuthMixin):
 
             # --- Clone ---
             dest = cfg_path.parent / "repos" / prefix
-            provider = _build_repo_provider(ctx, config, user_data_key="create_team")
+            provider: RepoProvider | None = None
             try:
+                provider = _build_repo_provider(ctx, config, user_data_key="create_team")
                 await provider.clone_repo(repo, dest)
             finally:
-                await provider.close()
+                if provider is not None:
+                    await _close_repo_provider(provider)
             completed["repo"] = str(dest)
             # Scaffold the dual-agent layout (idempotent — exist_ok=True).
             for sub in ("docs", "src", "tests"):
@@ -2596,10 +2709,8 @@ class ManagerBot(AuthMixin):
                 chat, exc, completed, config_committed=config_committed
             )
         finally:
-            try:
-                await bfc.disconnect()
-            except Exception:
-                pass
+            if bfc is not None:
+                await _safe_disconnect_bfc(bfc)
 
         return ConversationHandler.END
 
@@ -2740,7 +2851,6 @@ class ManagerBot(AuthMixin):
     async def _delete_team_execute(self, chat: ChatRef, target: str) -> None:
         """Best-effort cleanup. Partial-failure report lists whatever didn't work."""
         import shutil
-        from ..config import load_config
         try:
             BotFatherClient, delete_supergroup = _load_team_delete_dependencies()
         except ImportError:
@@ -2748,7 +2858,10 @@ class ManagerBot(AuthMixin):
             return
 
         cfg_path = self._project_config_path or DEFAULT_CONFIG
-        config = load_config(cfg_path)
+        config, err = _load_config_or_error(cfg_path)
+        if err is not None:
+            await self._transport.send_text(chat, err)
+            return
         team = config.teams.get(target)
         if team is None:
             await self._transport.send_text(
@@ -2794,10 +2907,7 @@ class ManagerBot(AuthMixin):
                 except Exception as exc:
                     failures.append(f"BotFather /deletebot @{bot.bot_username}: {exc}")
         finally:
-            try:
-                await bfc.disconnect()
-            except Exception:
-                pass
+            await _safe_disconnect_bfc(bfc)
 
         # 4. Delete Telegram supergroup (non-fatal).
         if team.group_chat_id and self._telethon_client is not None:
@@ -2820,9 +2930,9 @@ class ManagerBot(AuthMixin):
         # 6. Remove team entry from config (ALWAYS — final step).
         await edit("⟳ Removing team from config...")
         try:
+            from ..config import load_config, save_config
             updated = load_config(cfg_path)
             updated.teams.pop(target, None)
-            from ..config import save_config
             save_config(updated, cfg_path)
         except Exception as exc:
             failures.append(f"remove team from config: {exc}")
