@@ -543,3 +543,176 @@ async def test_setup_wizard_rejects_gitlab_host_with_scheme(tmp_path):
     assert bot._transport.sent_messages, "rejection must emit a guidance message"
     last = bot._transport.sent_messages[-1].text.lower()
     assert "scheme" in last or "host" in last or "invalid" in last
+
+
+# ─── Task 20: end-to-end create-project flow ───────────────────────────────
+
+
+def _make_e2e_manager_bot(config_path):
+    """Build a ManagerBot wired to FakeTransport for the E2E wizard tests.
+
+    Mirrors ``_make_manager_bot_for_setup_test`` above but additionally sets
+    ``_project_config_path`` so that ``_finalize_create``'s projects.json
+    writes land under tmp_path.
+    """
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    bot = ManagerBot("TOKEN", MagicMock(), project_config_path=config_path)
+    bot._transport = FakeTransport()
+    return bot
+
+
+async def test_e2e_create_project_with_gitlab(tmp_path, monkeypatch):
+    """End-to-end project-create wizard with provider=gitlab.
+
+    Walks: provider:gitlab → source=From GitHub → list page → pick repo →
+    set name → _execute_clone. Asserts ``GitLabClient.clone_repo`` was awaited
+    with a dest path under ``repos/<name>/``.
+    """
+    import json
+    from unittest.mock import AsyncMock, patch
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "gitlab_pat": "glpat-x", "gitlab_host": "gitlab.com",
+        "github_pat": "ghp_x",
+    }))
+    bot = _make_e2e_manager_bot(cfg)
+
+    fake_repos = [
+        RepoInfo(
+            name="my-app",
+            full_name="acme/my-app",
+            html_url="https://gitlab.com/acme/my-app",
+            clone_url="https://gitlab.com/acme/my-app.git",
+            description="An app",
+            private=True,
+        ),
+    ]
+    fake_client = MagicMock()
+    fake_client.list_repos = AsyncMock(return_value=(fake_repos, False))
+    fake_client.clone_repo = AsyncMock()
+    fake_client.close = AsyncMock()
+    monkeypatch.setattr(
+        "link_project_to_chat.gitlab_client.GitLabClient",
+        lambda **kw: fake_client,
+    )
+
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg)}}
+
+    # Step 1: provider pick → gitlab. Should land on CREATE_SOURCE.
+    pick = _make_button_update("provider:gitlab")
+    state = await bot._create_provider_pick_callback(pick, ctx)
+    assert ctx.user_data["create"]["provider"] == "gitlab"
+    assert state == ManagerBot.CREATE_SOURCE
+
+    # Step 2: source pick → "From GitHub" (the label is platform-agnostic now —
+    # the underlying provider was already chosen). Should land on CREATE_REPO_LIST.
+    source = _make_button_update("create_from_gh")
+    state = await bot._create_source_callback(source, ctx)
+    fake_client.list_repos.assert_awaited()
+    assert state == ManagerBot.CREATE_REPO_LIST
+    # The repos dict was cached in user_data for the pick step.
+    assert "acme/my-app" in ctx.user_data["create"]["repos"]
+
+    # Step 3: repo pick → "create_repo_acme/my-app". Should land on CREATE_NAME
+    # and have stored the repo on ctx.user_data["create"]["repo"].
+    repo_pick = _make_button_update("create_repo_acme/my-app")
+    state = await bot._create_repo_list_callback(repo_pick, ctx)
+    assert state == ManagerBot.CREATE_NAME
+    assert ctx.user_data["create"]["repo"]["full_name"] == "acme/my-app"
+
+    # Step 4: short-circuit name + bot-creation by setting fields directly,
+    # then invoke _execute_clone (the step under test). Asserts clone_repo
+    # was called with a dest under repos/myproj/.
+    ctx.user_data["create"]["name"] = "myproj"
+    ctx.user_data["create"]["bot_token"] = "FAKETOKEN"
+    ctx.user_data["create"]["bot_username"] = "bot_user"
+
+    # _execute_clone calls _finalize_create on success; stub that to halt here.
+    with patch.object(bot, "_finalize_create", new=AsyncMock(return_value=0)) as fin:
+        from link_project_to_chat.transport import ChatRef as _CR
+        from link_project_to_chat.transport.base import ChatKind as _CK
+        chat = _CR(transport_id="telegram", native_id="1", kind=_CK.DM)
+        await bot._execute_clone(chat, ctx)
+        fin.assert_awaited()
+
+    fake_client.clone_repo.assert_awaited_once()
+    call_args = fake_client.clone_repo.await_args
+    # _execute_clone signature: clone_repo(repo, dest)
+    dest = call_args.args[1]
+    assert "repos" in str(dest)
+    assert "myproj" in str(dest)
+
+
+async def test_e2e_create_project_with_github_still_works(tmp_path, monkeypatch):
+    """Regression: provider=github still wires the GitHubClient through the
+    same wizard transitions and reaches the clone step."""
+    import json
+    from unittest.mock import AsyncMock, patch
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"github_pat": "ghp-x"}))
+    bot = _make_e2e_manager_bot(cfg)
+
+    fake_repos = [
+        RepoInfo(
+            name="r",
+            full_name="u/r",
+            html_url="https://github.com/u/r",
+            clone_url="https://github.com/u/r.git",
+            description="",
+            private=False,
+        ),
+    ]
+    fake_client = MagicMock()
+    fake_client.list_repos = AsyncMock(return_value=(fake_repos, False))
+    fake_client.clone_repo = AsyncMock()
+    fake_client.close = AsyncMock()
+    monkeypatch.setattr(
+        "link_project_to_chat.github_client.GitHubClient",
+        lambda **kw: fake_client,
+    )
+
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg)}}
+
+    # Step 1: provider pick → github.
+    pick = _make_button_update("provider:github")
+    state = await bot._create_provider_pick_callback(pick, ctx)
+    assert ctx.user_data["create"]["provider"] == "github"
+    assert state == ManagerBot.CREATE_SOURCE
+
+    # Step 2: source pick → browse list. Calls GitHubClient.list_repos.
+    source = _make_button_update("create_from_gh")
+    state = await bot._create_source_callback(source, ctx)
+    fake_client.list_repos.assert_awaited()
+    assert state == ManagerBot.CREATE_REPO_LIST
+    assert "u/r" in ctx.user_data["create"]["repos"]
+
+    # Step 3: pick the repo.
+    repo_pick = _make_button_update("create_repo_u/r")
+    state = await bot._create_repo_list_callback(repo_pick, ctx)
+    assert state == ManagerBot.CREATE_NAME
+    assert ctx.user_data["create"]["repo"]["full_name"] == "u/r"
+
+    # Step 4: kick off the clone — GitHub path still uses GitHubClient.
+    ctx.user_data["create"]["name"] = "rg"
+    ctx.user_data["create"]["bot_token"] = "FAKETOKEN"
+    ctx.user_data["create"]["bot_username"] = "bot_user"
+    with patch.object(bot, "_finalize_create", new=AsyncMock(return_value=0)):
+        from link_project_to_chat.transport import ChatRef as _CR
+        from link_project_to_chat.transport.base import ChatKind as _CK
+        chat = _CR(transport_id="telegram", native_id="1", kind=_CK.DM)
+        await bot._execute_clone(chat, ctx)
+
+    fake_client.clone_repo.assert_awaited_once()
+    dest = fake_client.clone_repo.await_args.args[1]
+    assert "repos" in str(dest)
+    assert "rg" in str(dest)
