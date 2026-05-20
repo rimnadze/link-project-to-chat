@@ -32,6 +32,7 @@ def test_keep_patterns_override_scrub_patterns(monkeypatch):
     monkeypatch.setenv("CODEX_SESSION_TOKEN", "codex-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-secret")
+    monkeypatch.setenv("GITLAB_TOKEN", "gl-secret")
 
     env = _DummyBackend()._prepare_env()
 
@@ -39,6 +40,7 @@ def test_keep_patterns_override_scrub_patterns(monkeypatch):
     assert env["CODEX_SESSION_TOKEN"] == "codex-secret"
     assert "ANTHROPIC_API_KEY" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GITLAB_TOKEN" not in env
 
 
 def test_claude_backend_still_scrubs_openai_keys(monkeypatch, tmp_path):
