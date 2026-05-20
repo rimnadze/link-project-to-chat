@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "link-project-to-chat"
-version = "1.2.0"
+version = "1.4.0"
 description = "Link a project directory to a Telegram bot that chats with Claude"
 readme = "README.md"
 license = "MIT"

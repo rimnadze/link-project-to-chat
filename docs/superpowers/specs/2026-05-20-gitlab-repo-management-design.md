@@ -3,7 +3,7 @@
 **Date:** 2026-05-20
 **Status:** Approved (brainstorming complete; awaiting plan)
 **Author:** Revaz Chikashua (drafted with Claude)
-**Target release:** v1.3.0 (additive on top of v1.2.0; no dependency on the v1.2.0 GitLab parity sweep)
+**Target release:** v1.4.0 (additive on top of v1.2.0; no dependency on the v1.2.0 GitLab parity sweep)
 
 ## Summary
 
@@ -360,7 +360,7 @@ No new optional dependency. `glab` is an external CLI tool the operator installs
 ### 9. Docs
 
 - README "Quick start" section: add a `glab auth login` line next to the existing `gh auth login` line in the optional-prereqs list, and document `gitlab_host` for self-hosted operators.
-- `CHANGELOG.md` v1.3.0 entry calling out: new `gitlab_pat` / `gitlab_host` config fields, manager wizard provider-picker step, `glab` CLI auto-detection, GitLab team-mode block-list additions.
+- `CHANGELOG.md` v1.4.0 entry calling out: new `gitlab_pat` / `gitlab_host` config fields, manager wizard provider-picker step, `glab` CLI auto-detection, GitLab team-mode block-list additions.
 - `CLAUDE.md` / `AGENTS.md`: brief mention that `gitlab_client.py` mirrors `github_client.py` under a shared `RepoProvider` Protocol.
 - `docs/TODO.md` §1 (or a new sub-section): mark the spec + plan, status 🟡 → ✅ when shipped.
 
@@ -392,7 +392,7 @@ No new optional dependency. `glab` is an external CLI tool the operator installs
 ## Open questions
 
 - **Does `glab repo clone` honor `GIT_CONFIG_*` env overrides?** GitHub's `gh repo clone` does; need to verify before falling back to `git clone` only on the httpx path. If `glab repo clone` ignores `GIT_CONFIG_*`, the glab-path clone uses `glab`'s own auth (which is fine — `glab` is auth'd at that point). The httpx path always uses raw `git clone` with `GIT_CONFIG_*`, no ambiguity.
-- **Should the provider picker remember the last choice per-operator?** YAGNI for v1.3.0; revisit if friction is reported.
+- **Should the provider picker remember the last choice per-operator?** YAGNI for v1.4.0; revisit if friction is reported.
 
 ## References
 

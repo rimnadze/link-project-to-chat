@@ -1,4 +1,4 @@
-# v1.3.0 — GitLab repo management Implementation Plan
+# v1.4.0 — GitLab repo management Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -37,7 +37,7 @@
 ```bash
 git checkout dev
 git pull --ff-only
-git checkout -b feat/v1.3.0-gitlab-repo-management
+git checkout -b feat/v1.4.0-gitlab-repo-management
 ```
 
 - [ ] **Step 2: Capture baseline test count**
@@ -2380,12 +2380,12 @@ Find the "Quick start" / prereqs section in `README.md`. Next to the existing `g
 
 If a "Config fields" or "configure CLI" section exists, list `gitlab_pat` and `gitlab_host` there too.
 
-- [ ] **Step 2: CHANGELOG — add v1.3.0 entry**
+- [ ] **Step 2: CHANGELOG — add v1.4.0 entry**
 
 Insert at the top of `docs/CHANGELOG.md`:
 
 ```markdown
-## v1.3.0 — 2026-05-XX
+## v1.4.0 — 2026-05-XX
 
 ### Added
 - **GitLab repo source in the manager wizard.** Pick GitHub or GitLab when creating a project or team; the existing browse + paste-URL + clone flow works identically against either. Self-hosted GitLab supported via `Config.gitlab_host` (default `gitlab.com`). `glab` CLI is used when installed + authenticated; otherwise an `httpx + GITLAB_TOKEN` fallback applies.
@@ -2408,14 +2408,14 @@ Find the "Key modules" section in `CLAUDE.md`. Add a one-line entry next to the 
 
 Repeat the same line in `AGENTS.md` (the two are kept in sync per the file headers).
 
-- [ ] **Step 4: docs/TODO.md — log v1.3.0 status**
+- [ ] **Step 4: docs/TODO.md — log v1.4.0 status**
 
 Append a new section to `docs/TODO.md` (after the existing v1.0.0 / v1.1.0 / v1.2.0 sections):
 
 ```markdown
-### 1.6 GitLab repo management (v1.3.0)
+### 1.6 GitLab repo management (v1.4.0)
 
-Branch: `feat/v1.3.0-gitlab-repo-management`.
+Branch: `feat/v1.4.0-gitlab-repo-management`.
 
 Design doc: [2026-05-20-gitlab-repo-management-design.md](superpowers/specs/2026-05-20-gitlab-repo-management-design.md)
 Plan: [2026-05-20-gitlab-repo-management.md](superpowers/plans/2026-05-20-gitlab-repo-management.md) (22 tasks).
@@ -2434,7 +2434,7 @@ Expected: No errors.
 
 ```bash
 git add README.md docs/CHANGELOG.md CLAUDE.md AGENTS.md docs/TODO.md
-git commit -m "docs: v1.3.0 GitLab repo-management — README/CHANGELOG/CLAUDE/AGENTS/TODO"
+git commit -m "docs: v1.4.0 GitLab repo-management — README/CHANGELOG/CLAUDE/AGENTS/TODO"
 ```
 
 ---
@@ -2450,18 +2450,18 @@ git commit -m "docs: v1.3.0 GitLab repo-management — README/CHANGELOG/CLAUDE/A
 Run: `grep -n "version" pyproject.toml src/link_project_to_chat/__init__.py | head -5`
 Expected: lines showing the current version (e.g. `version = "1.2.0"` in pyproject.toml and `__version__ = "1.2.0"` in __init__.py).
 
-- [ ] **Step 2: Bump both to `1.3.0`**
+- [ ] **Step 2: Bump both to `1.4.0`**
 
 Edit `pyproject.toml`:
 
 ```toml
-version = "1.3.0"
+version = "1.4.0"
 ```
 
 Edit `src/link_project_to_chat/__init__.py`:
 
 ```python
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 ```
 
 - [ ] **Step 3: Run the version-consistency test**
@@ -2473,7 +2473,7 @@ Expected: PASS (this regression test was added in v1.0.0 and pins both files in 
 
 ```bash
 git add pyproject.toml src/link_project_to_chat/__init__.py
-git commit -m "chore: bump version to 1.3.0"
+git commit -m "chore: bump version to 1.4.0"
 ```
 
 ---
@@ -2498,13 +2498,13 @@ For each failing test:
 - [ ] **Step 3: Push the branch**
 
 ```bash
-git push -u origin feat/v1.3.0-gitlab-repo-management
+git push -u origin feat/v1.4.0-gitlab-repo-management
 ```
 
 - [ ] **Step 4: Open a draft PR**
 
 ```bash
-gh pr create --base dev --draft --title "v1.3.0 — GitLab repo management (browse + clone + manager wizard parity)" --body "$(cat <<'EOF'
+gh pr create --base dev --draft --title "v1.4.0 — GitLab repo management (browse + clone + manager wizard parity)" --body "$(cat <<'EOF'
 ## Summary
 
 Adds GitLab as a first-class repo source in the manager bot's create-project and create-team wizards, mirroring the existing GitHub flow under a shared `RepoProvider` Protocol.

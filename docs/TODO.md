@@ -107,7 +107,7 @@ Verification: `pytest -q` → **1118 passed, 5 skipped** (baseline 1003 + 115 ne
 - **Cloud Console Chat app creation** — manual. One GCP project per Chat app per Google's own constraint.
 - **Multiple Chat apps per GCP project** — Google limitation, no workaround inside lptc.
 
-### 1.6 GitLab repo management (v1.3.0)
+### 1.6 GitLab repo management (v1.4.0)
 
 Design doc: [2026-05-20-gitlab-repo-management-design.md](superpowers/specs/2026-05-20-gitlab-repo-management-design.md)
 Plan: [2026-05-20-gitlab-repo-management.md](superpowers/plans/2026-05-20-gitlab-repo-management.md) (24 tasks).
