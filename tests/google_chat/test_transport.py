@@ -777,6 +777,7 @@ async def test_start_fires_on_ready_callbacks_with_self_identity(tmp_path):
             service_account_file=str(service_account),
             allowed_audiences=["https://x.test/google-chat/events"],
             root_command_id=1,
+            port=0,
         ),
         client=_FakeClient(),
     )

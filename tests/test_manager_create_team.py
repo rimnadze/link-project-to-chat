@@ -96,6 +96,24 @@ def test_preflight_passes_when_all_good(tmp_path):
     assert err is None
 
 
+def test_preflight_passes_with_gitlab_only_auth(tmp_path, monkeypatch):
+    from link_project_to_chat.manager.bot import _create_team_preflight
+
+    monkeypatch.setattr("link_project_to_chat.github_client._gh_available", lambda: False)
+    cfg_path = tmp_path / "config.json"
+    config = Config(
+        telegram_api_id=1,
+        telegram_api_hash="x",
+        gitlab_pat="glpat-x",
+        gitlab_host="gitlab.com",
+    )
+    save_config(config, cfg_path)
+    (cfg_path.parent / "telethon.session").write_text("x")
+
+    err = _create_team_preflight(cfg_path, "acme")
+    assert err is None
+
+
 def test_preflight_rejects_prefix_over_22_chars(tmp_path):
     """Prefix + '_{role}_{N}_bot' must fit Telegram's 32-char username cap.
 

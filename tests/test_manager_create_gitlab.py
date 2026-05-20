@@ -98,6 +98,35 @@ def _make_button_update(callback_data: str, user_id: int = 1, username: str = "t
     return update
 
 
+def _make_command_update(text: str, user_id: int = 1, username: str = "tester"):
+    """Build a minimal PTB-style text Update for wizard entry points."""
+    from unittest.mock import MagicMock
+
+    user = MagicMock()
+    user.id = user_id
+    user.username = username
+    user.full_name = username
+    user.is_bot = False
+    chat = MagicMock()
+    chat.id = user_id
+    chat.type = "private"
+    msg = MagicMock()
+    msg.message_id = 1
+    msg.chat = chat
+    msg.text = text
+    update = MagicMock()
+    update.callback_query = None
+    update.message = msg
+    update.effective_user = user
+    update.effective_chat = chat
+    update.effective_message = msg
+    return update
+
+
+def _flatten_button_labels(buttons):
+    return [button.label for row in buttons.rows for button in row]
+
+
 @pytest.mark.asyncio
 async def test_project_create_provider_pick_gitlab_stores_choice_and_advances(tmp_path):
     """After picking GitLab, the wizard stores ``provider="gitlab"`` and shows
@@ -131,6 +160,51 @@ async def test_project_create_provider_pick_gitlab_stores_choice_and_advances(tm
     assert next_state == ManagerBot.CREATE_SOURCE
     # The picker prompt was edited in place into the repo-source prompt.
     assert mb._transport.edited_messages, "provider pick must edit_text the message"
+    edited = mb._transport.edited_messages[-1]
+    assert "GitHub" not in edited.text
+    assert "GitHub" not in " ".join(_flatten_button_labels(edited.buttons))
+
+
+@pytest.mark.asyncio
+async def test_project_create_entry_allows_gitlab_only_config_to_pick_provider(tmp_path, monkeypatch):
+    """A GitLab-only manager should reach provider selection, not fail GitHub preflight."""
+    from unittest.mock import AsyncMock
+
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    monkeypatch.setattr("link_project_to_chat.github_client._gh_available", lambda: False)
+
+    cfg_path = tmp_path / "config.json"
+    save_config(
+        Config(
+            telegram_api_id=1,
+            telegram_api_hash="x",
+            gitlab_pat="glpat-x",
+            gitlab_host="gitlab.com",
+        ),
+        cfg_path,
+    )
+    (cfg_path.parent / "telethon.session").write_text("x")
+
+    mb = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    mb._transport = FakeTransport()
+    mb._guard_executor = AsyncMock(return_value=True)
+
+    ctx = MagicMock()
+    ctx.user_data = {}
+
+    next_state = await mb._on_create_project(_make_command_update("/create_project"), ctx)
+
+    assert next_state == ManagerBot.CREATE_PROVIDER_PICK
+    assert ctx.user_data["create"]["config_path"] == str(cfg_path)
+    assert "GitHub not configured" not in mb._transport.sent_messages[-1].text
 
 
 @pytest.mark.asyncio
@@ -255,6 +329,47 @@ async def test_team_create_entry_routes_through_provider_pick(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_team_create_entry_allows_gitlab_only_config_to_pick_provider(tmp_path, monkeypatch):
+    """A GitLab-only manager should not be blocked by GitHub auth before provider pick."""
+    from unittest.mock import AsyncMock as _AM
+
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    monkeypatch.setattr("link_project_to_chat.github_client._gh_available", lambda: False)
+
+    cfg_path = tmp_path / "config.json"
+    save_config(
+        Config(
+            telegram_api_id=1,
+            telegram_api_hash="x",
+            gitlab_pat="glpat-x",
+            gitlab_host="gitlab.com",
+        ),
+        cfg_path,
+    )
+    (cfg_path.parent / "telethon.session").write_text("x")
+
+    mb = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    mb._transport = FakeTransport()
+    mb._guard_executor = _AM(return_value=True)
+
+    ctx = MagicMock()
+    ctx.user_data = {}
+
+    next_state = await mb._on_create_team(_make_command_update("/create_team"), ctx)
+
+    assert next_state == ManagerBot.CREATE_PROVIDER_PICK
+    assert ctx.user_data["create_team"]["config_path"] == str(cfg_path)
+
+
+@pytest.mark.asyncio
 async def test_team_create_provider_pick_advances_to_team_source(tmp_path):
     """Picking a provider in the team flow advances to CREATE_TEAM_SOURCE,
     not CREATE_SOURCE (which is project-only)."""
@@ -289,6 +404,58 @@ async def test_team_create_provider_pick_advances_to_team_source(tmp_path):
     assert next_state == ManagerBot.CREATE_TEAM_SOURCE
     # Sanity: the `create` key was NOT polluted.
     assert "create" not in ctx.user_data
+
+
+@pytest.mark.asyncio
+async def test_gitlab_project_paste_prompt_is_provider_neutral(tmp_path):
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(gitlab_pat="glpat-x"), cfg_path)
+
+    mb = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    mb._transport = FakeTransport()
+
+    ctx = MagicMock()
+    ctx.user_data = {"create": {"config_path": str(cfg_path), "provider": "gitlab"}}
+
+    state = await mb._create_source_callback(_make_button_update("create_paste_url"), ctx)
+
+    assert state == ManagerBot.CREATE_REPO_URL
+    assert "GitHub" not in mb._transport.edited_messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_gitlab_team_paste_prompt_is_provider_neutral(tmp_path):
+    from link_project_to_chat.config import Config, save_config
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.manager.process import ProcessManager
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    cfg_path = tmp_path / "config.json"
+    save_config(Config(gitlab_pat="glpat-x"), cfg_path)
+
+    mb = ManagerBot(
+        token="t",
+        process_manager=ProcessManager(project_config_path=cfg_path),
+        project_config_path=cfg_path,
+    )
+    mb._transport = FakeTransport()
+
+    ctx = MagicMock()
+    ctx.user_data = {"create_team": {"config_path": str(cfg_path), "provider": "gitlab"}}
+
+    state = await mb._create_team_source_callback(_make_button_update("ct_source:url"), ctx)
+
+    assert state == ManagerBot.CREATE_TEAM_REPO_URL
+    assert "GitHub" not in mb._transport.edited_messages[-1].text
 
 
 @pytest.mark.asyncio
@@ -566,7 +733,7 @@ def _make_e2e_manager_bot(config_path):
 async def test_e2e_create_project_with_gitlab(tmp_path, monkeypatch):
     """End-to-end project-create wizard with provider=gitlab.
 
-    Walks: provider:gitlab → source=From GitHub → list page → pick repo →
+    Walks: provider:gitlab → browse repos → list page → pick repo →
     set name → _execute_clone. Asserts ``GitLabClient.clone_repo`` was awaited
     with a dest path under ``repos/<name>/``.
     """
@@ -610,8 +777,7 @@ async def test_e2e_create_project_with_gitlab(tmp_path, monkeypatch):
     assert ctx.user_data["create"]["provider"] == "gitlab"
     assert state == ManagerBot.CREATE_SOURCE
 
-    # Step 2: source pick → "From GitHub" (the label is platform-agnostic now —
-    # the underlying provider was already chosen). Should land on CREATE_REPO_LIST.
+    # Step 2: source pick → browse list. The underlying provider was already chosen.
     source = _make_button_update("create_from_gh")
     state = await bot._create_source_callback(source, ctx)
     fake_client.list_repos.assert_awaited()

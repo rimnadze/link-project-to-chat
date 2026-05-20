@@ -1780,3 +1780,50 @@ def test_configure_rejects_gitlab_host_with_scheme(tmp_path):
     # "host" is in the flag name (--gitlab-host) so a bare "host" check would
     # match vacuously; require the actual error-message keywords instead.
     assert "bare hostname" in output or "scheme" in output
+
+
+def test_setup_sets_gitlab_pat(tmp_path):
+    """README-advertised `setup --gitlab-pat` writes gitlab_pat to disk."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(cfg), "setup", "--gitlab-pat", "glpat-secret"],
+    )
+
+    assert result.exit_code == 0, result.output
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_pat"] == "glpat-secret"
+
+
+def test_setup_sets_gitlab_host(tmp_path):
+    """README-advertised `setup --gitlab-host` writes gitlab_host to disk."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+
+    result = CliRunner().invoke(
+        main,
+        ["--config", str(cfg), "setup", "--gitlab-host", "gitlab.example.com"],
+    )
+
+    assert result.exit_code == 0, result.output
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_host"] == "gitlab.example.com"
+
+
+def test_setup_rejects_gitlab_host_with_scheme(tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({}))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--config", str(cfg), "setup",
+            "--gitlab-host", "https://gitlab.example.com",
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = (result.output + (result.stderr or "")).lower()
+    assert "bare hostname" in output or "scheme" in output

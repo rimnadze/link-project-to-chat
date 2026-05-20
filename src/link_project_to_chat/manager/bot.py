@@ -130,12 +130,12 @@ def _parse_edit_callback(data: str) -> tuple[str, str] | None:
 def _create_team_preflight(cfg_path: Path, prefix: str | None = None) -> str | None:
     """Return an error string if pre-flight fails, None if OK.
 
-    When ``prefix`` is None, only checks credential prereqs (Telethon, GitHub).
+    When ``prefix`` is None, only checks Telegram/Telethon prerequisites.
     When ``prefix`` is given, additionally checks for team-name and legacy project-name
-    collisions.
+    collisions. Repo-provider auth is checked later by the selected provider
+    (GitHub or GitLab), after the operator chooses one.
     """
     from ..config import load_config
-    from ..github_client import _gh_available
 
     config = load_config(cfg_path)
 
@@ -144,9 +144,6 @@ def _create_team_preflight(cfg_path: Path, prefix: str | None = None) -> str | N
     session_file = cfg_path.parent / "telethon.session"
     if not session_file.exists():
         return "Run `/setup` first — Telethon session is not established."
-
-    if not config.github_pat and not _gh_available():
-        return "GitHub auth missing — run `/setup` with a PAT, or authenticate `gh` CLI."
 
     if prefix is None:
         return None
@@ -1948,7 +1945,6 @@ class ManagerBot(AuthMixin):
             return ConversationHandler.END
         incoming = self._incoming_from_update(update)
         try:
-            from ..github_client import GitHubClient, _gh_available
             from ..botfather import BotFatherClient
         except ImportError:
             await self._transport.send_text(incoming.chat, _CREATE_DEPS_MESSAGE)
@@ -1956,12 +1952,6 @@ class ManagerBot(AuthMixin):
         from ..config import load_config
         path = self._project_config_path or DEFAULT_CONFIG
         config = load_config(path)
-        if not config.github_pat and not _gh_available():
-            await self._transport.send_text(
-                incoming.chat,
-                "GitHub not configured. Run /setup to set a PAT, or install gh CLI.",
-            )
-            return ConversationHandler.END
         if not config.telegram_api_id or not config.telegram_api_hash:
             await self._transport.send_text(
                 incoming.chat,
@@ -2052,7 +2042,7 @@ class ManagerBot(AuthMixin):
 
         # Project flow: existing repo-source picker.
         buttons = Buttons(rows=[
-            [Button(label="From GitHub", value="create_from_gh")],
+            [Button(label="Browse my repos", value="create_from_gh")],
             [Button(label="Paste URL", value="create_paste_url")],
         ])
         await self._transport.edit_text(
@@ -2068,7 +2058,7 @@ class ManagerBot(AuthMixin):
         if data == "create_from_gh":
             return await self._show_repo_page(msg_ref, ctx, page=1)
         elif data == "create_paste_url":
-            await self._transport.edit_text(msg_ref, "Paste the GitHub repo URL:")
+            await self._transport.edit_text(msg_ref, "Paste the repo URL:")
             return self.CREATE_REPO_URL
         return ConversationHandler.END
 
@@ -2382,7 +2372,7 @@ class ManagerBot(AuthMixin):
         if source == "github":
             return await self._show_repo_page(msg_ref, ctx, page=1, user_data_key="create_team")
         await self._transport.edit_text(
-            msg_ref, "Paste the repo URL (e.g. https://github.com/owner/repo):",
+            msg_ref, "Paste the repo URL:",
         )
         return self.CREATE_TEAM_REPO_URL
 

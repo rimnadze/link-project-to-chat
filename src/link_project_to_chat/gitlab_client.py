@@ -27,14 +27,17 @@ from .repo_provider import RepoInfo
 logger = logging.getLogger(__name__)
 
 
-def _glab_available() -> bool:
+def _glab_available(host: str = "gitlab.com") -> bool:
     """Check if glab CLI is installed and authenticated."""
     glab_path = shutil.which("glab")
     if glab_path is None:
         return False
+    cmd = [glab_path, "auth", "status"]
+    if host != "gitlab.com":
+        cmd.extend(["--hostname", host])
     try:
         proc = subprocess.run(
-            [glab_path, "auth", "status"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -45,11 +48,12 @@ def _glab_available() -> bool:
     return proc.returncode == 0
 
 
-async def _run_glab(*args: str) -> tuple[int, str, str]:
+async def _run_glab(*args: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Run a glab CLI command and return (returncode, stdout, stderr)."""
     proc = await asyncio.create_subprocess_exec(
         "glab", *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
@@ -108,10 +112,10 @@ class GitLabClient:
     """GitLab client that uses glab CLI if available, falls back to PAT + httpx."""
 
     def __init__(self, pat: str = "", host: str = "gitlab.com"):
-        self._pat = pat
+        self._pat = pat or os.environ.get("GITLAB_TOKEN", "")
         self._host = host
         prefer_api = bool(pat) and httpx is not None
-        self._use_glab = _glab_available() and not prefer_api
+        self._use_glab = False if prefer_api else _glab_available(host=host)
         self._client = None
         if not self._use_glab:
             if httpx is None:
@@ -120,11 +124,11 @@ class GitLabClient:
                     "Install glab (https://gitlab.com/gitlab-org/cli) or run: "
                     "pip install link-project-to-chat[create]"
                 )
-            if not pat:
+            if not self._pat:
                 raise ValueError("GitLab PAT required when glab CLI is not available.")
             self._client = httpx.AsyncClient(
                 base_url=f"https://{host}/api/v4",
-                headers={"PRIVATE-TOKEN": pat},
+                headers={"PRIVATE-TOKEN": self._pat},
                 timeout=30.0,
             )
 
@@ -151,9 +155,15 @@ class GitLabClient:
 
     async def _list_repos_glab(self, page: int, per_page: int) -> tuple[list[RepoInfo], bool]:
         # `glab api --include` emits HTTP headers + body the same shape as `gh api --include`.
-        code, stdout, stderr = await _run_glab(
-            "api", "--include",
+        args = ["api"]
+        if self._host != "gitlab.com":
+            args.extend(["--hostname", self._host])
+        args.extend([
+            "--include",
             f"projects?membership=true&order_by=updated_at&page={page}&per_page={per_page}",
+        ])
+        code, stdout, stderr = await _run_glab(
+            *args,
         )
         if code != 0:
             raise Exception(f"glab api projects failed: {stderr}")
@@ -185,15 +195,24 @@ class GitLabClient:
     async def _validate_glab(self, full_path: str) -> RepoInfo | None:
         from urllib.parse import quote
         encoded = quote(full_path, safe="")
-        code, stdout, stderr = await _run_glab("api", f"projects/{encoded}")
+        args = ["api"]
+        if self._host != "gitlab.com":
+            args.extend(["--hostname", self._host])
+        args.append(f"projects/{encoded}")
+        code, stdout, stderr = await _run_glab(*args)
         if code != 0:
             return None
         return _repo_info_from_project(json.loads(stdout))
 
     async def _clone_glab(self, repo: RepoInfo, dest: Path) -> None:
+        env = None
+        if self._host != "gitlab.com":
+            env = os.environ.copy()
+            env["GITLAB_HOST"] = self._host
         proc = await asyncio.create_subprocess_exec(
             "glab", "repo", "clone", repo.full_name, str(dest),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:

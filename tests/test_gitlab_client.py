@@ -31,6 +31,19 @@ def test_glab_available_when_ready():
         assert gitlab_client._glab_available() is True
 
 
+def test_glab_available_checks_specific_host():
+    from link_project_to_chat import gitlab_client
+
+    fake_proc = MagicMock(returncode=0)
+    with patch("link_project_to_chat.gitlab_client.shutil.which", return_value="/usr/bin/glab"), \
+         patch("link_project_to_chat.gitlab_client.subprocess.run", return_value=fake_proc) as mock_run:
+        assert gitlab_client._glab_available(host="gitlab.example.com") is True
+
+    assert mock_run.call_args.args[0] == [
+        "/usr/bin/glab", "auth", "status", "--hostname", "gitlab.example.com",
+    ]
+
+
 def test_redact_secrets_redacts_raw_pat():
     from link_project_to_chat.gitlab_client import _redact_secrets
     out = _redact_secrets("error: glpat-abc123", "glpat-abc123", host="gitlab.com")
@@ -82,6 +95,17 @@ def test_init_uses_glab_when_no_pat_and_glab_available():
         client = gitlab_client.GitLabClient(pat="")
     assert client._use_glab is True
     assert client._client is None
+
+
+def test_init_uses_gitlab_token_env_when_no_pat_and_no_glab(monkeypatch):
+    from link_project_to_chat import gitlab_client
+
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-env")
+    with patch("link_project_to_chat.gitlab_client._glab_available", return_value=False):
+        client = gitlab_client.GitLabClient(pat="")
+
+    assert client._pat == "glpat-env"
+    assert client._client.headers["PRIVATE-TOKEN"] == "glpat-env"
 
 
 def test_init_raises_when_no_pat_and_no_glab():
@@ -187,7 +211,7 @@ async def test_list_repos_httpx_auth_failure(gl_api_client):
 def gl_glab_client(monkeypatch):
     """Force glab CLI mode (no PAT)."""
     from link_project_to_chat import gitlab_client
-    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: True)
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda host="gitlab.com": True)
     return gitlab_client.GitLabClient(pat="")
 
 
@@ -211,6 +235,24 @@ async def test_list_repos_glab_parses_link_header_and_body(gl_glab_client):
     assert args[0] == "api"
     assert "--include" in args
     assert any("projects" in a and "membership=true" in a for a in args)
+
+
+async def test_list_repos_glab_self_hosted_uses_hostname(monkeypatch):
+    from link_project_to_chat import gitlab_client
+
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda host="gitlab.com": True)
+    client = gitlab_client.GitLabClient(pat="", host="gitlab.example.com")
+    body = "[]"
+    stdout = "HTTP/2.0 200 OK\r\n\r\n" + body
+    with patch(
+        "link_project_to_chat.gitlab_client._run_glab",
+        AsyncMock(return_value=(0, stdout, "")),
+    ) as mock_run:
+        await client.list_repos(page=1, per_page=5)
+
+    args = mock_run.await_args.args
+    assert "--hostname" in args
+    assert "gitlab.example.com" in args
 
 
 async def test_list_repos_glab_no_next_page(gl_glab_client):
@@ -286,6 +328,31 @@ async def test_validate_repo_url_self_hosted(monkeypatch):
         info = await client.validate_repo_url("https://gitlab.example.com/g/p")
     assert info is not None
     assert info.html_url == "https://gitlab.example.com/g/p"
+
+
+async def test_validate_repo_url_glab_self_hosted_uses_hostname(monkeypatch):
+    from link_project_to_chat import gitlab_client
+
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda host="gitlab.com": True)
+    client = gitlab_client.GitLabClient(pat="", host="gitlab.example.com")
+    project = {
+        "path": "p",
+        "path_with_namespace": "g/p",
+        "web_url": "https://gitlab.example.com/g/p",
+        "http_url_to_repo": "https://gitlab.example.com/g/p.git",
+        "description": "",
+        "visibility": "private",
+    }
+    with patch(
+        "link_project_to_chat.gitlab_client._run_glab",
+        AsyncMock(return_value=(0, __import__("json").dumps(project), "")),
+    ) as mock_run:
+        info = await client.validate_repo_url("https://gitlab.example.com/g/p")
+
+    assert info is not None
+    args = mock_run.await_args.args
+    assert "--hostname" in args
+    assert "gitlab.example.com" in args
 
 
 async def test_validate_repo_url_rejects_github(gl_api_client):
@@ -414,6 +481,27 @@ async def test_clone_repo_glab_mode_uses_full_name(gl_glab_client, tmp_path: Pat
     assert args[1:3] == ("repo", "clone")
     assert args[3] == "group/sub/p"
     assert args[4] == str(tmp_path / "p")
+
+
+async def test_clone_repo_glab_self_hosted_sets_gitlab_host(monkeypatch, tmp_path: Path):
+    from link_project_to_chat import gitlab_client
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda host="gitlab.com": True)
+    client = gitlab_client.GitLabClient(pat="", host="gitlab.example.com")
+    repo = RepoInfo(
+        name="p", full_name="group/p",
+        html_url="https://gitlab.example.com/group/p",
+        clone_url="https://gitlab.example.com/group/p.git",
+        description="", private=True,
+    )
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(0)),
+    ) as mock_exec:
+        await client.clone_repo(repo, tmp_path / "p")
+
+    assert mock_exec.await_args.kwargs["env"]["GITLAB_HOST"] == "gitlab.example.com"
 
 
 async def test_clone_repo_glab_mode_failure_raises(gl_glab_client, tmp_path: Path):

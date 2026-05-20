@@ -802,6 +802,12 @@ def start(
 
 @main.command()
 @click.option("--github-pat", default=None, help="GitHub Personal Access Token")
+@click.option("--gitlab-pat", default=None, help="GitLab Personal Access Token")
+@click.option(
+    "--gitlab-host",
+    default=None,
+    help="GitLab host (default: gitlab.com). Bare hostname only -- no scheme, no path.",
+)
 @click.option("--telegram-api-id", default=None, type=int, help="Telegram API ID (from my.telegram.org)")
 @click.option("--telegram-api-hash", default=None, help="Telegram API Hash")
 @click.option("--phone", default=None, help="Phone number for Telethon auth (e.g. +995511166693)")
@@ -815,8 +821,8 @@ def start(
               help="Text-to-speech backend for voice responses")
 @click.option("--tts-voice", default=None, help="TTS voice (alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer)")
 @click.pass_context
-def setup(ctx, github_pat: str | None, telegram_api_id: int | None, telegram_api_hash: str | None, phone: str | None, stt_backend: str | None, openai_api_key: str | None, whisper_model: str | None, whisper_language: str | None, tts_backend: str | None, tts_voice: str | None):
-    """Set up GitHub PAT, Telegram API credentials, and Telethon authentication.
+def setup(ctx, github_pat: str | None, gitlab_pat: str | None, gitlab_host: str | None, telegram_api_id: int | None, telegram_api_hash: str | None, phone: str | None, stt_backend: str | None, openai_api_key: str | None, whisper_model: str | None, whisper_language: str | None, tts_backend: str | None, tts_voice: str | None):
+    """Set up repo-provider PATs, Telegram API credentials, and Telethon authentication.
 
     Run without arguments for interactive setup. Or pass individual options.
     """
@@ -829,7 +835,7 @@ def setup(ctx, github_pat: str | None, telegram_api_id: int | None, telegram_api
     # Use `is not None` rather than truthiness so `--whisper-language ""` still
     # counts as an explicit flag (user requesting auto-detect reset).
     interactive = all(v is None for v in [
-        github_pat, telegram_api_id, telegram_api_hash, phone,
+        github_pat, gitlab_pat, gitlab_host, telegram_api_id, telegram_api_hash, phone,
         stt_backend, openai_api_key, whisper_model, whisper_language,
         tts_backend, tts_voice,
     ])
@@ -841,6 +847,21 @@ def setup(ctx, github_pat: str | None, telegram_api_id: int | None, telegram_api
         config.github_pat = github_pat
         changed = True
         click.echo("GitHub PAT saved.")
+
+    if gitlab_pat is not None:
+        config.gitlab_pat = gitlab_pat
+        changed = True
+        click.echo("GitLab PAT saved.")
+
+    if gitlab_host is not None:
+        if "://" in gitlab_host or "/" in gitlab_host.rstrip("/"):
+            raise click.UsageError(
+                "--gitlab-host must be a bare hostname (e.g. gitlab.example.com); "
+                "no scheme, no path."
+            )
+        config.gitlab_host = gitlab_host.rstrip("/")
+        changed = True
+        click.echo(f"GitLab host set to {config.gitlab_host}.")
 
     # Telegram API credentials
     if telegram_api_id or telegram_api_hash or (interactive and click.confirm("Configure Telegram API credentials?", default=not config.telegram_api_id)):
