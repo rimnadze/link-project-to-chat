@@ -126,6 +126,22 @@ class GitLabClient:
         has_next = 'rel="next"' in resp.headers.get("link", "")
         return repos, has_next
 
+    async def _list_repos_glab(self, page: int, per_page: int) -> tuple[list[RepoInfo], bool]:
+        # `glab api --include` emits HTTP headers + body the same shape as `gh api --include`.
+        code, stdout, stderr = await _run_glab(
+            "api", "--include",
+            f"projects?membership=true&order_by=updated_at&page={page}&per_page={per_page}",
+        )
+        if code != 0:
+            raise Exception(f"glab api projects failed: {stderr}")
+        sep = "\r\n\r\n" if "\r\n\r\n" in stdout else "\n\n"
+        headers_part, _, body_part = stdout.partition(sep)
+        if not body_part:
+            raise Exception("glab api returned no body")
+        has_next = 'rel="next"' in headers_part
+        repos = [_repo_info_from_project(p) for p in json.loads(body_part)]
+        return repos, has_next
+
     async def close(self) -> None:
         if self._client:
             await self._client.aclose()

@@ -180,3 +180,51 @@ async def test_list_repos_httpx_auth_failure(gl_api_client):
         mock_client.get = AsyncMock(return_value=_mock_resp(401, {"message": "Unauthorized"}))
         with pytest.raises(Exception, match="GitLab API error 401"):
             await gl_api_client.list_repos()
+
+
+@pytest.fixture
+def gl_glab_client(monkeypatch):
+    """Force glab CLI mode (no PAT)."""
+    from link_project_to_chat import gitlab_client
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: True)
+    return gitlab_client.GitLabClient(pat="")
+
+
+async def test_list_repos_glab_parses_link_header_and_body(gl_glab_client):
+    import json
+    body = json.dumps([
+        {"path": "p1", "path_with_namespace": "u/p1", "web_url": "https://gitlab.com/u/p1",
+         "http_url_to_repo": "https://gitlab.com/u/p1.git", "description": "", "visibility": "private"},
+    ])
+    headers = (
+        'HTTP/2.0 200 OK\r\n'
+        'Link: <https://gitlab.com/api/v4/projects?page=2>; rel="next"\r\n'
+    )
+    stdout = headers + "\r\n" + body
+    with patch("link_project_to_chat.gitlab_client._run_glab",
+               AsyncMock(return_value=(0, stdout, ""))) as mock_run:
+        repos, has_next = await gl_glab_client.list_repos(page=1, per_page=5)
+    assert [r.full_name for r in repos] == ["u/p1"]
+    assert has_next is True
+    args = mock_run.await_args.args
+    assert args[0] == "api"
+    assert "--include" in args
+    assert any("projects" in a and "membership=true" in a for a in args)
+
+
+async def test_list_repos_glab_no_next_page(gl_glab_client):
+    import json
+    body = json.dumps([])
+    stdout = "HTTP/2.0 200 OK\r\n\r\n" + body
+    with patch("link_project_to_chat.gitlab_client._run_glab",
+               AsyncMock(return_value=(0, stdout, ""))):
+        repos, has_next = await gl_glab_client.list_repos(page=1, per_page=5)
+    assert repos == []
+    assert has_next is False
+
+
+async def test_list_repos_glab_failure_raises(gl_glab_client):
+    with patch("link_project_to_chat.gitlab_client._run_glab",
+               AsyncMock(return_value=(1, "", "auth error"))):
+        with pytest.raises(Exception, match="glab api .* failed"):
+            await gl_glab_client.list_repos()
