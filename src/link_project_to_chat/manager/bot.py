@@ -252,17 +252,11 @@ async def _create_bot_with_retry(
     raise RuntimeError(f"Bot username unavailable after {max_attempts} attempts (base={base_username})")
 
 
-# ConversationHandler state for the GitLab provider picker. Shared between the
-# /create_project and /create_team wizards: each ConversationHandler is scoped
-# per-handler, so a single state int suffices.
-STATE_CREATE_PROVIDER_PICK = 25
-
-
 def _build_repo_provider(ctx, config) -> "RepoProvider":
     """Construct a RepoProvider from the wizard's stored provider choice.
 
     Reads ``ctx.user_data["create"]["provider"]`` — set by the new
-    STATE_CREATE_PROVIDER_PICK callback. Defaults to GitHub when the field
+    CREATE_PROVIDER_PICK callback. Defaults to GitHub when the field
     is missing (legacy callers).
     """
     provider = ctx.user_data.get("create", {}).get("provider", "github")
@@ -724,6 +718,11 @@ class ManagerBot(AuthMixin):
 
     # ConversationHandler state for /delete_team (single confirmation step)
     DELETE_TEAM_CONFIRM = 24
+
+    # ConversationHandler state for the GitLab provider picker. Shared between
+    # the /create_project and /create_team wizards: each ConversationHandler is
+    # scoped per-handler, so a single state int suffices.
+    CREATE_PROVIDER_PICK = 25
 
     async def _on_add_project(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         if not await self._guard_executor(update):

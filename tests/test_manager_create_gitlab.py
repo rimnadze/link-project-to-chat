@@ -37,13 +37,13 @@ def test_build_repo_provider_returns_gitlab_client_when_picked(monkeypatch, tmp_
 
 
 def test_provider_pick_state_constant_is_unique():
-    from link_project_to_chat.manager import bot as manager_bot
+    from link_project_to_chat.manager.bot import ManagerBot
     state_attrs = [
-        a for a in dir(manager_bot)
-        if a.startswith("STATE_CREATE_") and isinstance(getattr(manager_bot, a), int)
+        a for a in dir(ManagerBot)
+        if a.startswith("CREATE_") and isinstance(getattr(ManagerBot, a), int)
     ]
-    state_values = [getattr(manager_bot, a) for a in state_attrs]
-    assert "STATE_CREATE_PROVIDER_PICK" in state_attrs
+    state_values = [getattr(ManagerBot, a) for a in state_attrs]
+    assert "CREATE_PROVIDER_PICK" in state_attrs
     assert len(state_values) == len(set(state_values)), "duplicate state ints"
 
 
