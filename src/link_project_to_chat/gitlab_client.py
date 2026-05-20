@@ -67,6 +67,24 @@ def _repo_info_from_project(p: dict) -> RepoInfo:
     )
 
 
+def _git_auth_env(pat: str, host: str) -> dict[str, str]:
+    """Inject a one-shot GitLab auth header via env, not argv.
+
+    Uses ``Authorization: Bearer {pat}`` (GitLab convention). The GitHub
+    equivalent uses ``basic`` with a base64'd ``x-access-token:{pat}`` pair —
+    these MUST differ.
+    """
+    env = os.environ.copy()
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        count = 0
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    env[f"GIT_CONFIG_KEY_{count}"] = f"http.https://{host}/.extraHeader"
+    env[f"GIT_CONFIG_VALUE_{count}"] = f"AUTHORIZATION: Bearer {pat}"
+    return env
+
+
 def _gitlab_url_re(host: str) -> "re.Pattern[str]":
     """Compile a per-host URL regex. Supports subgroups via the multi-segment capture."""
     return re.compile(rf"https?://{re.escape(host)}/((?:[^/\s]+/)+?[^/\s]+?)(?:\.git)?/?$")
@@ -171,6 +189,24 @@ class GitLabClient:
         if code != 0:
             return None
         return _repo_info_from_project(json.loads(stdout))
+
+    async def clone_repo(self, repo: RepoInfo, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if self._use_glab:
+            await self._clone_glab(repo, dest)
+            return
+        env = _git_auth_env(self._pat, self._host) if self._pat else None
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", repo.clone_url, str(dest),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise Exception(
+                "git clone failed: "
+                + _redact_secrets(stderr.decode().strip(), self._pat, host=self._host)
+            )
 
     async def close(self) -> None:
         if self._client:

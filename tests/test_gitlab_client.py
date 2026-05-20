@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -310,3 +311,84 @@ async def test_validate_repo_url_not_found(gl_api_client):
         mock_client.get = AsyncMock(return_value=_mock_resp(404, {"message": "Not Found"}))
         info = await gl_api_client.validate_repo_url("https://gitlab.com/x/y")
     assert info is None
+
+
+class _FakeProc:
+    def __init__(self, returncode: int, stderr: bytes = b"", stdout: bytes = b""):
+        self.returncode = returncode
+        self._stderr = stderr
+        self._stdout = stdout
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
+async def test_clone_repo_api_mode_injects_bearer_via_git_config(
+    gl_api_client, tmp_path: Path,
+):
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    repo = RepoInfo(
+        name="p", full_name="u/p",
+        html_url="https://gitlab.com/u/p",
+        clone_url="https://gitlab.com/u/p.git",
+        description="", private=True,
+    )
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(0)),
+    ) as mock_exec:
+        await gl_api_client.clone_repo(repo, tmp_path / "p")
+
+    args = mock_exec.await_args.args
+    kwargs = mock_exec.await_args.kwargs
+    assert args[:3] == ("git", "clone", "https://gitlab.com/u/p.git")
+    assert all("glpat-test123" not in str(a) for a in args)
+    env = kwargs["env"]
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "http.https://gitlab.com/.extraHeader"
+    assert env["GIT_CONFIG_VALUE_0"] == "AUTHORIZATION: Bearer glpat-test123"
+
+
+async def test_clone_repo_api_mode_redacts_pat_in_errors(gl_api_client, tmp_path: Path):
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    repo = RepoInfo(
+        name="p", full_name="u/p",
+        html_url="https://gitlab.com/u/p",
+        clone_url="https://gitlab.com/u/p.git",
+        description="", private=True,
+    )
+    stderr = b"fatal: https://glpat-test123@gitlab.com/u/p.git access denied"
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(1, stderr=stderr)),
+    ):
+        with pytest.raises(Exception, match="git clone failed") as exc:
+            await gl_api_client.clone_repo(repo, tmp_path / "p")
+    assert "glpat-test123" not in str(exc.value)
+    assert "[REDACTED]" in str(exc.value)
+
+
+async def test_clone_repo_api_mode_uses_self_hosted_host_in_git_config(
+    monkeypatch, tmp_path: Path,
+):
+    from link_project_to_chat import gitlab_client
+    from link_project_to_chat.repo_provider import RepoInfo
+
+    monkeypatch.setattr(gitlab_client, "_glab_available", lambda: False)
+    client = gitlab_client.GitLabClient(pat="glpat-x", host="gitlab.example.com")
+    repo = RepoInfo(
+        name="p", full_name="u/p",
+        html_url="https://gitlab.example.com/u/p",
+        clone_url="https://gitlab.example.com/u/p.git",
+        description="", private=True,
+    )
+    with patch(
+        "link_project_to_chat.gitlab_client.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_FakeProc(0)),
+    ) as mock_exec:
+        await client.clone_repo(repo, tmp_path / "p")
+
+    env = mock_exec.await_args.kwargs["env"]
+    assert env["GIT_CONFIG_KEY_0"] == "http.https://gitlab.example.com/.extraHeader"
