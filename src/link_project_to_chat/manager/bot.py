@@ -1100,6 +1100,8 @@ class ManagerBot(AuthMixin):
 
         lines = ["Setup status:"]
         lines.append(f"  GitHub PAT: {'configured' if config.github_pat else 'not set'}")
+        lines.append(f"  GitLab PAT: {'configured' if config.gitlab_pat else 'not set'}")
+        lines.append(f"  GitLab host: {config.gitlab_host or 'gitlab.com'}")
         lines.append(f"  Telegram API ID: {'configured' if config.telegram_api_id else 'not set'}")
         lines.append(f"  Telegram API Hash: {'configured' if config.telegram_api_hash else 'not set'}")
         session_path = path.parent / "telethon.session"
@@ -1108,6 +1110,8 @@ class ManagerBot(AuthMixin):
 
         rows: list[list[Button]] = []
         rows.append([Button(label="Set GitHub Token", value="setup_gh")])
+        rows.append([Button(label="Set GitLab PAT (masked)", value="setup_gl")])
+        rows.append([Button(label="Set GitLab host", value="setup_gl_host")])
         rows.append([Button(label="Set Telegram API", value="setup_api")])
         if config.telegram_api_id and config.telegram_api_hash:
             rows.append([Button(label="Authenticate Telethon", value="setup_telethon")])
@@ -1354,6 +1358,33 @@ class ManagerBot(AuthMixin):
             config.github_pat = text
             save_config(config, path)
             await self._transport.send_text(chat, "GitHub PAT saved. Use /setup to continue.")
+
+        elif awaiting == "gitlab_pat":
+            ctx.user_data.pop("setup_awaiting")
+            config = load_config(path)
+            config.gitlab_pat = text
+            save_config(config, path)
+            await self._transport.send_text(chat, "GitLab PAT saved. Use /setup to continue.")
+
+        elif awaiting == "gitlab_host":
+            # Validate a bare hostname; reject scheme/path so the value can be
+            # safely composed into URLs by the GitLab client. The config-load
+            # path normalizes on read (``_normalize_gitlab_host``), but doing
+            # it here too gives the operator immediate feedback during /setup
+            # rather than silently rewriting their input.
+            raw_value = text
+            if "://" in raw_value or "/" in raw_value.rstrip("/"):
+                await self._transport.send_text(
+                    chat,
+                    "Invalid host. Use a bare hostname like gitlab.example.com — "
+                    "no scheme, no path.",
+                )
+                return
+            ctx.user_data.pop("setup_awaiting")
+            config = load_config(path)
+            config.gitlab_host = raw_value.rstrip("/")
+            save_config(config, path)
+            await self._transport.send_text(chat, "GitLab host saved. Use /setup to continue.")
 
         elif awaiting == "api_id":
             try:
@@ -3372,6 +3403,26 @@ class ManagerBot(AuthMixin):
                 ctx_user_data["setup_awaiting"] = "github_pat"
             await self._transport.edit_text(
                 click.message, "Paste your GitHub Personal Access Token:",
+            )
+
+        elif value == "setup_gl":
+            if not await self._require_executor_button(click):
+                return
+            if ctx_user_data is not None:
+                ctx_user_data["setup_awaiting"] = "gitlab_pat"
+            await self._transport.edit_text(
+                click.message, "Paste your GitLab Personal Access Token:",
+            )
+
+        elif value == "setup_gl_host":
+            if not await self._require_executor_button(click):
+                return
+            if ctx_user_data is not None:
+                ctx_user_data["setup_awaiting"] = "gitlab_host"
+            await self._transport.edit_text(
+                click.message,
+                "Enter your GitLab host (bare hostname, e.g. gitlab.example.com — "
+                "no scheme, no path):",
             )
 
         elif value == "setup_api":

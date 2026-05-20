@@ -427,3 +427,119 @@ async def test_team_create_execute_clones_via_provider_factory(tmp_path, monkeyp
 
     fake_gitlab.clone_repo.assert_awaited()
     fake_gitlab.close.assert_awaited()
+
+
+# ─── Task 19: /setup wizard fields for gitlab_pat and gitlab_host ──────────
+
+
+def _make_text_update_for_setup(text: str, *, user_id: int = 42, username: str = "op"):
+    """Minimal PTB-style Update for the setup-wizard text-input handler.
+
+    ``_handle_setup_input`` reads ``update.effective_message.text`` (via
+    ``_incoming_from_update``) and ``update.effective_user``/``effective_chat``
+    for identity/chat resolution. Match what ``_make_text_update`` does in
+    tests/test_manager_create_google_chat.py.
+    """
+    from unittest.mock import AsyncMock as _AM, MagicMock as _MM
+
+    user = _MM()
+    user.id = user_id
+    user.username = username
+    user.full_name = username
+    user.is_bot = False
+    chat = _MM()
+    chat.id = user_id
+    chat.type = "private"
+    message = _AM()
+    message.reply_text = _AM()
+    message.text = text
+    message.chat = chat
+    message.message_id = 1
+    update = _MM()
+    update.effective_user = user
+    update.effective_message = message
+    update.effective_chat = chat
+    update.message = message
+    return update
+
+
+def _make_manager_bot_for_setup_test(config_path):
+    """Build a ManagerBot with a FakeTransport wired in for setup-wizard tests.
+
+    Mirrors ``_make_bot`` in tests/test_manager_create_google_chat.py but
+    drops the executor/identity allowlist (the setup-input handler under test
+    is reached after the auth/executor guards in ``_edit_field_save`` — the
+    tests call ``_handle_setup_input`` directly, so guards are not on the
+    path).
+    """
+    from link_project_to_chat.manager.bot import ManagerBot
+    from link_project_to_chat.transport.fake import FakeTransport
+
+    bot = ManagerBot("TOKEN", MagicMock(), project_config_path=config_path)
+    bot._transport = FakeTransport()
+    return bot
+
+
+async def test_setup_wizard_persists_gitlab_pat(tmp_path):
+    """Setting gitlab_pat via the /setup wizard writes config.json."""
+    import json
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    bot = _make_manager_bot_for_setup_test(cfg)
+
+    ctx = MagicMock()
+    ctx.user_data = {
+        "setup_awaiting": "gitlab_pat",
+        "setup_config_path": str(cfg),
+    }
+    update = _make_text_update_for_setup("glpat-newvalue")
+    await bot._handle_setup_input(update, ctx, "gitlab_pat")
+
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_pat"] == "glpat-newvalue"
+
+
+async def test_setup_wizard_persists_gitlab_host(tmp_path):
+    """Setting gitlab_host via the /setup wizard writes config.json."""
+    import json
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    bot = _make_manager_bot_for_setup_test(cfg)
+
+    ctx = MagicMock()
+    ctx.user_data = {
+        "setup_awaiting": "gitlab_host",
+        "setup_config_path": str(cfg),
+    }
+    update = _make_text_update_for_setup("gitlab.example.com")
+    await bot._handle_setup_input(update, ctx, "gitlab_host")
+
+    raw = json.loads(cfg.read_text())
+    assert raw["gitlab_host"] == "gitlab.example.com"
+
+
+async def test_setup_wizard_rejects_gitlab_host_with_scheme(tmp_path):
+    """A host containing scheme or path is rejected; no persistence happens
+    and a guidance message is sent so the operator can correct it."""
+    import json
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    bot = _make_manager_bot_for_setup_test(cfg)
+
+    ctx = MagicMock()
+    ctx.user_data = {
+        "setup_awaiting": "gitlab_host",
+        "setup_config_path": str(cfg),
+    }
+    update = _make_text_update_for_setup("https://gitlab.example.com")
+    await bot._handle_setup_input(update, ctx, "gitlab_host")
+
+    raw = json.loads(cfg.read_text())
+    assert "gitlab_host" not in raw
+    # A rejection message must be sent so the operator can fix the value.
+    assert bot._transport.sent_messages, "rejection must emit a guidance message"
+    last = bot._transport.sent_messages[-1].text.lower()
+    assert "scheme" in last or "host" in last or "invalid" in last
