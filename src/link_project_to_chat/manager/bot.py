@@ -1945,14 +1945,56 @@ class ManagerBot(AuthMixin):
             return ConversationHandler.END
 
         ctx.user_data["create"] = {"config_path": str(path)}
+        return await self._show_provider_pick(update, ctx)
+
+    async def _show_provider_pick(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+        """Render the provider picker and return ``CREATE_PROVIDER_PICK``.
+
+        Used as the first step of the /create_project wizard. Accepts either a
+        text-driven entry (``update.message`` is set) or a callback-driven
+        re-entry (``update.callback_query`` is set), matching the dual entry
+        pattern used elsewhere in the wizard.
+        """
+        buttons = Buttons(rows=[
+            [Button(label="GitHub", value="provider:github")],
+            [Button(label="GitLab", value="provider:gitlab")],
+            [Button(label="Cancel", value="provider:cancel")],
+        ])
+        if update.callback_query is not None:
+            msg_ref = self._msg_ref_from_query(update.callback_query)
+            await self._transport.edit_text(
+                msg_ref, "Pick a repo provider:", buttons=buttons,
+            )
+        else:
+            incoming = self._incoming_from_update(update)
+            await self._transport.send_text(
+                incoming.chat, "Pick a repo provider:", buttons=buttons,
+            )
+        return self.CREATE_PROVIDER_PICK
+
+    async def _create_provider_pick_callback(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        """Handle the provider-picker button press: store the choice + advance."""
+        query = update.callback_query
+        await query.answer()
+        payload = query.data
+        msg_ref = self._msg_ref_from_query(query)
+        if payload == "provider:cancel":
+            ctx.user_data.pop("create", None)
+            await self._transport.edit_text(msg_ref, "Cancelled.")
+            return ConversationHandler.END
+        if payload not in ("provider:github", "provider:gitlab"):
+            # Unknown payload — re-render the picker by staying in the same state.
+            return self.CREATE_PROVIDER_PICK
+        ctx.user_data.setdefault("create", {})["provider"] = payload.split(":", 1)[1]
+        # Advance to the existing repo-source picker (GitHub browse / paste URL).
         buttons = Buttons(rows=[
             [Button(label="From GitHub", value="create_from_gh")],
             [Button(label="Paste URL", value="create_paste_url")],
         ])
-        await self._transport.send_text(
-            incoming.chat,
-            "Create project — choose repo source:",
-            buttons=buttons,
+        await self._transport.edit_text(
+            msg_ref, "Create project — choose repo source:", buttons=buttons,
         )
         return self.CREATE_SOURCE
 
@@ -1971,18 +2013,17 @@ class ManagerBot(AuthMixin):
     async def _show_repo_page(
         self, msg: MessageRef, ctx, page: int, user_data_key: str = "create",
     ) -> int:
-        from ..github_client import GitHubClient
         from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
         config = load_config(path)
-        gh = GitHubClient(pat=config.github_pat)
+        provider = _build_repo_provider(ctx, config)
         try:
-            repos, has_next = await gh.list_repos(page=page, per_page=5)
+            repos, has_next = await provider.list_repos(page=page, per_page=5)
         except Exception as e:
-            await self._transport.edit_text(msg, f"GitHub API error: {e}")
+            await self._transport.edit_text(msg, f"Repo provider error: {e}")
             return ConversationHandler.END
         finally:
-            await gh.close()
+            await provider.close()
         if not repos:
             await self._transport.edit_text(msg, "No repos found.")
             return ConversationHandler.END
@@ -2046,22 +2087,21 @@ class ManagerBot(AuthMixin):
     ) -> int:
         incoming = self._incoming_from_update(update)
         url = incoming.text.strip()
-        from ..github_client import GitHubClient
         from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
         config = load_config(path)
-        gh = GitHubClient(pat=config.github_pat)
+        provider = _build_repo_provider(ctx, config)
         try:
-            repo = await gh.validate_repo_url(url)
+            repo = await provider.validate_repo_url(url)
         except Exception as e:
             await self._transport.send_text(incoming.chat, f"Error: {e}\nTry again or /cancel:")
             return self.CREATE_TEAM_REPO_URL if user_data_key == "create_team" else self.CREATE_REPO_URL
         finally:
-            await gh.close()
+            await provider.close()
         if not repo:
             await self._transport.send_text(
                 incoming.chat,
-                "Invalid or not found. Paste a valid GitHub URL:",
+                "Invalid or not found. Paste a valid repo URL:",
             )
             return self.CREATE_TEAM_REPO_URL if user_data_key == "create_team" else self.CREATE_REPO_URL
         ctx.user_data[user_data_key]["repo"] = repo.__dict__
@@ -2182,7 +2222,7 @@ class ManagerBot(AuthMixin):
         return await self._execute_clone(incoming.chat, ctx)
 
     async def _execute_clone(self, chat: ChatRef, ctx) -> int:
-        from ..github_client import GitHubClient, RepoInfo
+        from ..repo_provider import RepoInfo
         from ..config import load_config
         path = Path(ctx.user_data["create"]["config_path"])
         config = load_config(path)
@@ -2190,9 +2230,9 @@ class ManagerBot(AuthMixin):
         repo = RepoInfo(**repo_data)
         name = ctx.user_data["create"]["name"]
         dest = path.parent / "repos" / name
-        gh = GitHubClient(pat=config.github_pat)
+        provider = _build_repo_provider(ctx, config)
         try:
-            await gh.clone_repo(repo, dest)
+            await provider.clone_repo(repo, dest)
             ctx.user_data["create"]["clone_path"] = str(dest)
         except Exception as e:
             buttons = Buttons(rows=[
@@ -2202,7 +2242,7 @@ class ManagerBot(AuthMixin):
             await self._transport.send_text(chat, f"Clone failed: {e}", buttons=buttons)
             return self.CREATE_CLONE
         finally:
-            await gh.close()
+            await provider.close()
         return await self._finalize_create(chat, ctx)
 
     async def _create_clone_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3554,6 +3594,11 @@ class ManagerBot(AuthMixin):
             app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("create_project", self._on_create_project)],
                 states={
+                    self.CREATE_PROVIDER_PICK: [
+                        CallbackQueryHandler(
+                            self._create_provider_pick_callback, pattern=r"^provider:",
+                        ),
+                    ],
                     self.CREATE_SOURCE: [CallbackQueryHandler(self._create_source_callback)],
                     self.CREATE_REPO_LIST: [CallbackQueryHandler(self._create_repo_list_callback)],
                     self.CREATE_REPO_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self._create_repo_url)],
