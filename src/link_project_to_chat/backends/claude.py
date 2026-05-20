@@ -102,10 +102,23 @@ _ASK_DISMISSED_HINT = (
 )
 
 _TEAM_DISALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
-    "push": ("Bash(git push:*)", "Bash(git push)", "Bash(gh pr merge:*)"),
-    "pr_create": ("Bash(gh pr create:*)",),
-    "release": ("Bash(gh release create:*)",),
-    "network": ("Bash(curl:*)", "Bash(wget:*)", "Bash(gh workflow run:*)"),
+    "push": (
+        "Bash(git push:*)", "Bash(git push)",
+        "Bash(gh pr merge:*)", "Bash(glab mr merge:*)",
+    ),
+    "pr_create": (
+        "Bash(gh pr create:*)",
+        "Bash(glab mr create:*)",
+    ),
+    "release": (
+        "Bash(gh release create:*)",
+        "Bash(glab release create:*)",
+    ),
+    "network": (
+        "Bash(curl:*)", "Bash(wget:*)",
+        "Bash(gh workflow run:*)",
+        "Bash(glab ci run:*)",
+    ),
 }
 
 # Tells the agent it is running inside this Telegram bot so it adapts output, suggests

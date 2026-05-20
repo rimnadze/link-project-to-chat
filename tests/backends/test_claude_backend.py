@@ -50,6 +50,13 @@ def test_claude_team_mode_blocks_external_side_effect_tools(tmp_path):
     blocked = cmd[cmd.index("--disallowedTools") + 1].split(",")
     assert "Bash(git push:*)" in blocked
     assert "Bash(gh pr create:*)" in blocked
+    assert "Bash(glab mr create:*)" in blocked
+    assert "Bash(gh pr merge:*)" in blocked
+    assert "Bash(glab mr merge:*)" in blocked
+    assert "Bash(gh release create:*)" in blocked
+    assert "Bash(glab release create:*)" in blocked
+    assert "Bash(gh workflow run:*)" in blocked
+    assert "Bash(glab ci run:*)" in blocked
 
 
 def test_claude_team_mode_respects_push_grant(tmp_path):
@@ -66,6 +73,7 @@ def test_claude_team_mode_respects_push_grant(tmp_path):
     blocked = cmd[cmd.index("--disallowedTools") + 1].split(",")
     assert "Bash(git push:*)" not in blocked
     assert "Bash(gh pr create:*)" in blocked
+    assert "Bash(glab mr create:*)" in blocked
 
 
 def test_status_includes_permission_tools_and_usage_cap_state():
