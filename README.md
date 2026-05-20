@@ -434,10 +434,10 @@ link-project-to-chat start-manager
 | `/start_all` | Start all projects |
 | `/stop_all` | Stop all projects |
 | `/add_project` | Add a project interactively |
-| `/create_project` | Create a project (GitHub repo + auto bot creation) |
-| `/create_team` | Create a multi-bot team in a group chat (interactive wizard) |
+| `/create_project` | Create a project (GitHub or GitLab repo + auto bot creation) |
+| `/create_team` | Create a multi-bot team in a group chat (interactive wizard; picks GitHub or GitLab) |
 | `/delete_team` | Delete a team and clean up its bots |
-| `/setup` | Configure GitHub PAT and Telegram API credentials |
+| `/setup` | Configure GitHub PAT, GitLab PAT/host, and Telegram API credentials |
 | `/users` | List authorized users |
 | `/add_user <username>` | Add an authorized user |
 | `/remove_user <username>` | Remove an authorized user |
@@ -449,15 +449,21 @@ link-project-to-chat start-manager
 
 The `/create_project` command automates the full project setup:
 
-1. Select a GitHub repo (browse your repos or paste a URL)
-2. Automatically create a Telegram bot via BotFather
-3. Clone the repo
-4. Configure everything
+1. Pick a repo provider (GitHub or GitLab)
+2. Select a repo (browse your repos or paste a URL)
+3. Automatically create a Telegram bot via BotFather
+4. Clone the repo
+5. Configure everything
+
+`/create_team` opens with the same GitHub / GitLab picker before the
+browse + paste-URL + clone steps. Self-hosted GitLab is supported via
+`Config.gitlab_host` (default `gitlab.com`).
 
 When you later remove a project from the manager, manager-created projects are cleaned up on a best-effort basis: the manager will try to stop the bot, delete the owned repo checkout, and revoke the owned bot via BotFather. If the project path was changed after creation, the repo is left in place intentionally.
 
 **Requirements:**
-- GitHub: either `gh` CLI authenticated, or a GitHub PAT (set via `/setup`)
+- **`gh` CLI** (optional, for GitHub repo browse/clone in the manager wizard) — `gh auth login`. Alternatively set a GitHub PAT via `/setup`.
+- **`glab` CLI** (optional, for GitLab repo browse/clone) — `glab auth login`. For a self-hosted GitLab instance, also set `gitlab_host` in your config: `link-project-to-chat configure --gitlab-host gitlab.example.com` (bare hostname, no scheme). Alternatively set a GitLab PAT via `link-project-to-chat configure --gitlab-pat ...` or `/setup`.
 - BotFather automation: Telegram API credentials + Telethon session
 - Team creation/deletion automation: install the optional create extras with `pipx install "link-project-to-chat[create]"`
 
@@ -477,7 +483,9 @@ The CLI `setup` command handles Telethon phone authentication interactively — 
 
 ```
 link-project-to-chat configure --username USER [--remove-username USER] [--manager-token TOKEN]
-link-project-to-chat setup [--github-pat PAT] [--telegram-api-id ID] [--telegram-api-hash HASH] [--phone PHONE]
+                                [--gitlab-pat PAT] [--gitlab-host HOST]
+link-project-to-chat setup [--github-pat PAT] [--gitlab-pat PAT] [--gitlab-host HOST]
+                            [--telegram-api-id ID] [--telegram-api-hash HASH] [--phone PHONE]
 
 link-project-to-chat projects list
 link-project-to-chat projects add --name NAME --path PATH --token TOKEN [--username USER] [--model MODEL]

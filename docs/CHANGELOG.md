@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.0 — 2026-05-20
+
+### Added
+- **GitLab repo source in the manager wizard.** Pick GitHub or GitLab when creating a project or team; the existing browse + paste-URL + clone flow works identically against either. Self-hosted GitLab supported via `Config.gitlab_host` (default `gitlab.com`). `glab` CLI is used when installed + authenticated; otherwise an `httpx + GITLAB_TOKEN` fallback applies.
+- `Config.gitlab_pat` and `Config.gitlab_host` fields. CLI flags `configure --gitlab-pat` and `configure --gitlab-host`. Manager `/setup` wizard gains GitLab fields.
+- `repo_provider.py` Protocol for cross-provider abstraction. Both `GitHubClient` and `GitLabClient` satisfy it.
+
+### Security
+- Team-mode block list extended: `glab mr create`, `glab mr merge`, `glab release create`, `glab ci run`.
+- `GITLAB_TOKEN` env-scrub regression test pinned.
+- PAT redaction in `gitlab_client._redact_secrets` covers raw, base64, and credential-URL forms (on both gitlab.com and the configured self-hosted host).
+
 ## 1.3.0 — 2026-05-17
 
 ### Google Chat manager integration
