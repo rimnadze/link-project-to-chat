@@ -1292,3 +1292,28 @@ def test_empty_gitlab_pat_is_omitted_from_saved_json(tmp_path: Path):
     save_config(config, cfg_file)
     raw = json.loads(cfg_file.read_text())
     assert "gitlab_pat" not in raw
+
+
+def test_gitlab_host_strips_scheme(tmp_path: Path, caplog):
+    """A user who manually edits config.json may include a scheme. Strip it."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"gitlab_host": "https://gitlab.example.com"}))
+    with caplog.at_level("WARNING"):
+        config = load_config(cfg_file)
+    assert config.gitlab_host == "gitlab.example.com"
+    assert any("gitlab_host" in r.message for r in caplog.records)
+
+
+def test_gitlab_host_strips_trailing_slash(tmp_path: Path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"gitlab_host": "gitlab.example.com/"}))
+    config = load_config(cfg_file)
+    assert config.gitlab_host == "gitlab.example.com"
+
+
+def test_gitlab_host_strips_path(tmp_path: Path, caplog):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"gitlab_host": "gitlab.example.com/some/path"}))
+    with caplog.at_level("WARNING"):
+        config = load_config(cfg_file)
+    assert config.gitlab_host == "gitlab.example.com"

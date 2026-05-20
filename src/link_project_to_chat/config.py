@@ -65,6 +65,26 @@ def parse_user_bool(value: str) -> bool | None:
     return None
 
 
+def _normalize_gitlab_host(raw: str) -> tuple[str, bool]:
+    """Strip scheme, path, and trailing slash from a user-supplied host.
+
+    Returns ``(normalized, was_cleaned)`` — ``was_cleaned`` is True iff
+    the input contained any of those (caller logs a warning then).
+    """
+    if not isinstance(raw, str):
+        return ("gitlab.com", False)
+    cleaned = raw.strip()
+    original = cleaned
+    if "://" in cleaned:
+        cleaned = cleaned.split("://", 1)[1]
+    if "/" in cleaned:
+        cleaned = cleaned.split("/", 1)[0]
+    cleaned = cleaned.rstrip("/")
+    if not cleaned:
+        return ("gitlab.com", original != "")
+    return (cleaned, cleaned != original)
+
+
 def _is_web_native_id(native_id: str) -> bool:
     return (
         native_id == "browser_user"
@@ -1145,7 +1165,14 @@ def _load_config_unlocked(
             config.meta_dir = DEFAULT_META_DIR
         config.github_pat = raw.get("github_pat", "")
         config.gitlab_pat = raw.get("gitlab_pat", "")
-        config.gitlab_host = raw.get("gitlab_host", "gitlab.com")
+        gitlab_host_raw = raw.get("gitlab_host", "gitlab.com")
+        normalized, was_cleaned = _normalize_gitlab_host(gitlab_host_raw)
+        if was_cleaned:
+            logger.warning(
+                "gitlab_host %r had scheme/path/slash; normalized to %r",
+                gitlab_host_raw, normalized,
+            )
+        config.gitlab_host = normalized
         config.telegram_api_id = raw.get("telegram_api_id", 0)
         config.telegram_api_hash = raw.get("telegram_api_hash", "")
         # Support old name for backward compatibility
