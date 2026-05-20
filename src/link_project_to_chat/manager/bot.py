@@ -252,14 +252,15 @@ async def _create_bot_with_retry(
     raise RuntimeError(f"Bot username unavailable after {max_attempts} attempts (base={base_username})")
 
 
-def _build_repo_provider(ctx, config) -> "RepoProvider":
+def _build_repo_provider(ctx, config, user_data_key: str = "create") -> "RepoProvider":
     """Construct a RepoProvider from the wizard's stored provider choice.
 
-    Reads ``ctx.user_data["create"]["provider"]`` — set by the new
-    CREATE_PROVIDER_PICK callback. Defaults to GitHub when the field
-    is missing (legacy callers).
+    Reads ``ctx.user_data[user_data_key]["provider"]`` — set by the
+    CREATE_PROVIDER_PICK callback. Defaults to ``"create"`` for the
+    /create_project wizard; the /create_team wizard passes ``"create_team"``.
+    Defaults to GitHub when the field is missing (legacy callers).
     """
-    provider = ctx.user_data.get("create", {}).get("provider", "github")
+    provider = ctx.user_data.get(user_data_key, {}).get("provider", "github")
     if provider == "gitlab":
         from ..gitlab_client import GitLabClient
         return GitLabClient(pat=config.gitlab_pat, host=config.gitlab_host)
@@ -1947,13 +1948,21 @@ class ManagerBot(AuthMixin):
         ctx.user_data["create"] = {"config_path": str(path)}
         return await self._show_provider_pick(update, ctx)
 
-    async def _show_provider_pick(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    async def _show_provider_pick(
+        self,
+        update: Update,
+        ctx: ContextTypes.DEFAULT_TYPE,
+        user_data_key: str = "create",
+    ) -> int:
         """Render the provider picker and return ``CREATE_PROVIDER_PICK``.
 
-        Used as the first step of the /create_project wizard. Accepts either a
-        text-driven entry (``update.message`` is set) or a callback-driven
-        re-entry (``update.callback_query`` is set), matching the dual entry
-        pattern used elsewhere in the wizard.
+        Used as the first step of both the /create_project and /create_team
+        wizards. Accepts either a text-driven entry (``update.message`` is set)
+        or a callback-driven re-entry (``update.callback_query`` is set),
+        matching the dual entry pattern used elsewhere in the wizard.
+
+        ``user_data_key`` is unused here but kept symmetrically with the
+        callback signature so call-sites can pass through a single wizard key.
         """
         buttons = Buttons(rows=[
             [Button(label="GitHub", value="provider:github")],
@@ -1973,22 +1982,44 @@ class ManagerBot(AuthMixin):
         return self.CREATE_PROVIDER_PICK
 
     async def _create_provider_pick_callback(
-        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE
+        self,
+        update: Update,
+        ctx: ContextTypes.DEFAULT_TYPE,
+        user_data_key: str = "create",
     ) -> int:
-        """Handle the provider-picker button press: store the choice + advance."""
+        """Handle the provider-picker button press: store the choice + advance.
+
+        ``user_data_key`` selects which wizard slot ("create" vs "create_team")
+        the choice is stored in, and which downstream state we transition to
+        (CREATE_SOURCE for project-create, CREATE_TEAM_SOURCE for team-create).
+        Production wires this via a lambda in the per-wizard ConversationHandler
+        state-map, matching the pattern used by ``_create_repo_list_callback``.
+        """
         query = update.callback_query
         await query.answer()
         payload = query.data
         msg_ref = self._msg_ref_from_query(query)
         if payload == "provider:cancel":
-            ctx.user_data.pop("create", None)
+            ctx.user_data.pop(user_data_key, None)
             await self._transport.edit_text(msg_ref, "Cancelled.")
             return ConversationHandler.END
         if payload not in ("provider:github", "provider:gitlab"):
             # Unknown payload — re-render the picker by staying in the same state.
             return self.CREATE_PROVIDER_PICK
-        ctx.user_data.setdefault("create", {})["provider"] = payload.split(":", 1)[1]
-        # Advance to the existing repo-source picker (GitHub browse / paste URL).
+        ctx.user_data.setdefault(user_data_key, {})["provider"] = payload.split(":", 1)[1]
+
+        if user_data_key == "create_team":
+            # Team flow: show team-specific source buttons + return CREATE_TEAM_SOURCE.
+            buttons = Buttons(rows=[
+                [Button(label="Browse my repos", value="ct_source:github")],
+                [Button(label="Paste a URL", value="ct_source:url")],
+            ])
+            await self._transport.edit_text(
+                msg_ref, "How would you like to pick the repo?", buttons=buttons,
+            )
+            return self.CREATE_TEAM_SOURCE
+
+        # Project flow: existing repo-source picker.
         buttons = Buttons(rows=[
             [Button(label="From GitHub", value="create_from_gh")],
             [Button(label="Paste URL", value="create_paste_url")],
@@ -2016,7 +2047,7 @@ class ManagerBot(AuthMixin):
         from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
         config = load_config(path)
-        provider = _build_repo_provider(ctx, config)
+        provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
         try:
             repos, has_next = await provider.list_repos(page=page, per_page=5)
         except Exception as e:
@@ -2090,7 +2121,7 @@ class ManagerBot(AuthMixin):
         from ..config import load_config
         path = Path(ctx.user_data[user_data_key]["config_path"])
         config = load_config(path)
-        provider = _build_repo_provider(ctx, config)
+        provider = _build_repo_provider(ctx, config, user_data_key=user_data_key)
         try:
             repo = await provider.validate_repo_url(url)
         except Exception as e:
@@ -2296,7 +2327,7 @@ class ManagerBot(AuthMixin):
         return ConversationHandler.END
 
     async def _on_create_team(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-        """Entry point for /create_team — pick repo source (GitHub browse vs paste URL)."""
+        """Entry point for /create_team — pick repo provider first (Task 18)."""
         if not await self._guard_executor(update):
             return ConversationHandler.END
         incoming = self._incoming_from_update(update)
@@ -2309,16 +2340,7 @@ class ManagerBot(AuthMixin):
             return ConversationHandler.END
 
         ctx.user_data["create_team"] = {"config_path": str(cfg_path)}
-        buttons = Buttons(rows=[
-            [Button(label="Browse my GitHub repos", value="ct_source:github")],
-            [Button(label="Paste a URL", value="ct_source:url")],
-        ])
-        await self._transport.send_text(
-            incoming.chat,
-            "How would you like to pick the repo?",
-            buttons=buttons,
-        )
-        return self.CREATE_TEAM_SOURCE
+        return await self._show_provider_pick(update, ctx, user_data_key="create_team")
 
     async def _create_team_source_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         query = update.callback_query
@@ -2469,11 +2491,11 @@ class ManagerBot(AuthMixin):
 
             # --- Clone ---
             dest = cfg_path.parent / "repos" / prefix
-            gh = GitHubClient(pat=config.github_pat)
+            provider = _build_repo_provider(ctx, config, user_data_key="create_team")
             try:
-                await gh.clone_repo(repo, dest)
+                await provider.clone_repo(repo, dest)
             finally:
-                await gh.close()
+                await provider.close()
             completed["repo"] = str(dest)
             # Scaffold the dual-agent layout (idempotent — exist_ok=True).
             for sub in ("docs", "src", "tests"):
@@ -3616,6 +3638,14 @@ class ManagerBot(AuthMixin):
             app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("create_team", self._on_create_team)],
                 states={
+                    self.CREATE_PROVIDER_PICK: [
+                        CallbackQueryHandler(
+                            lambda u, c: self._create_provider_pick_callback(
+                                u, c, user_data_key="create_team",
+                            ),
+                            pattern=r"^provider:",
+                        ),
+                    ],
                     self.CREATE_TEAM_SOURCE: [
                         CallbackQueryHandler(self._create_team_source_callback, pattern=r"^ct_source:"),
                     ],
