@@ -2395,7 +2395,7 @@ class ManagerBot(AuthMixin):
                 client=getattr(self, "_telethon_client", None),
             )
             bot_username = sanitize_bot_username(name)
-            token = await bf.create_bot(display_name=f"{name} Claude", username=bot_username)
+            token = await bf.create_bot(display_name=f"{name} Agent", username=bot_username)
             ctx.user_data["create"]["bot_token"] = token
             ctx.user_data["create"]["bot_username"] = bot_username
             await self._transport.send_text(

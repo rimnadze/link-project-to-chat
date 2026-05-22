@@ -638,12 +638,15 @@ async def test_execute_bot_creation_reuses_managers_telethon_client(
     save_config(Config(telegram_api_id=1, telegram_api_hash="x"), proj_cfg)
 
     constructor_kwargs: dict = {}
+    create_bot_kwargs: dict = {}
 
     class FakeBotFatherClient:
         def __init__(self, api_id, api_hash, session_path, client=None):
             constructor_kwargs["client"] = client
 
         async def create_bot(self, display_name: str, username: str) -> str:
+            create_bot_kwargs["display_name"] = display_name
+            create_bot_kwargs["username"] = username
             raise RuntimeError("stop here — we only care about constructor args")
 
         async def disconnect(self) -> None:
@@ -663,6 +666,10 @@ async def test_execute_bot_creation_reuses_managers_telethon_client(
     )
 
     assert constructor_kwargs["client"] is sentinel_client
+    assert create_bot_kwargs == {
+        "display_name": "myproj Agent",
+        "username": "myproj_bot",
+    }
 
 
 def _write_team(proj_cfg: Path, team: str, bots: dict, group_chat_id: int = -1001) -> None:
